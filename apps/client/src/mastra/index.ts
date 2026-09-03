@@ -1,0 +1,11 @@
+import { Mastra } from "@mastra/core/mastra";
+import { MastraEditor } from "@mastra/editor";
+import { portmaxAssistant } from "./agents/portmax-assistant.js";
+
+export const mastra = new Mastra({
+  agents: { portmaxAssistant },
+  editor: new MastraEditor({
+    source: "code",
+    codePath: "./mastra/editor",
+  }),
+});

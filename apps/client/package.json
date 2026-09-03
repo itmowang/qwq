@@ -1,0 +1,26 @@
+{
+  "name": "client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "mastra dev",
+    "build": "mastra build",
+    "start": "mastra start",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mastra/core": "1.64.0",
+    "@mastra/editor": "0.14.3",
+    "dotenv": "17.4.2",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.13",
+    "mastra": "1.27.3",
+    "typescript": "5.9.3"
+  }
+}

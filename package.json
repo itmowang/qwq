@@ -1,0 +1,12 @@
+{
+  "name": "mastra-portmax-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.11.0",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "check": "pnpm -r run check",
+    "dev:client": "pnpm --filter client dev",
+    "dev:portmax": "pnpm --filter portmax_api dev"
+  }
+}
