@@ -13,6 +13,7 @@
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@mastra/ai-sdk": "1.10.1",
     "@mastra/core": "1.64.0",
     "@mastra/editor": "0.14.3",
     "dotenv": "17.4.2",

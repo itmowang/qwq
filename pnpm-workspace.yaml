@@ -1,2 +1,9 @@
 packages:
   - apps/*
+
+onlyBuiltDependencies:
+  - electron
+  - esbuild
+
+ignoredBuiltDependencies:
+  - electron-winstaller

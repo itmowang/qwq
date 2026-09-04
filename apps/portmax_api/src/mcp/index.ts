@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
-import { forwardUpstream } from "./proxy.js";
+import { forwardUpstream } from "../http/proxy.js";
 
 const requestSchema = {
   path: z.string().startsWith("/").describe("Path and optional query string on the configured upstream."),

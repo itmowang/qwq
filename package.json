@@ -7,6 +7,8 @@
     "build": "pnpm -r run build",
     "check": "pnpm -r run check",
     "dev:client": "pnpm --filter client dev",
-    "dev:portmax": "pnpm --filter portmax_api dev"
+    "dev:desktop": "pnpm --filter desktop dev",
+    "dev:portmax": "pnpm --filter portmax_api dev",
+    "package:desktop": "pnpm --filter desktop build:win"
   }
 }

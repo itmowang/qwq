@@ -6,7 +6,8 @@
 
 ```text
 apps/
-  client/        # Mastra Agent 与本地工具的最小示例
+  client/        # Mastra Agent、Studio 与 Electron 聊天 API
+  desktop/       # Electron + React 桌面聊天客户端
   portmax_api/   # Hono HTTP 代理 + Streamable HTTP MCP 服务
 ```
 

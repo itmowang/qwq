@@ -12,6 +12,8 @@ export type ProxyRequest = {
   method: string;
   headers?: Record<string, string>;
   body?: BodyInit | null;
+  /** A route-specific authorization value that takes precedence over the default upstream credential. */
+  authorization?: string;
 };
 
 function getUpstreamBaseUrl(): URL {
@@ -75,10 +77,10 @@ export function selectResponseHeaders(source: Headers): Headers {
 /** Sends a request only to the configured upstream origin. */
 export async function forwardUpstream(request: ProxyRequest): Promise<Response> {
   const headers = new Headers(request.headers);
-  const configuredAuthorization = process.env.PORTMAX_UPSTREAM_AUTHORIZATION;
+  const authorization = request.authorization ?? process.env.PORTMAX_UPSTREAM_AUTHORIZATION;
 
-  if (configuredAuthorization) {
-    headers.set("authorization", configuredAuthorization);
+  if (authorization) {
+    headers.set("authorization", authorization);
   }
 
   return fetch(resolveTargetUrl(request.path), {
