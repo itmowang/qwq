@@ -18,7 +18,10 @@ importers:
         version: 1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6)
       '@mastra/editor':
         specifier: 0.14.3
-        version: 0.14.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(ws@8.21.3)(zod@4.3.6)
+        version: 0.14.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(@mastra/mcp@1.17.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(express@5.2.1)(hono@4.13.5)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6))(ws@8.21.3)(zod@4.3.6)
+      '@mastra/mcp':
+        specifier: 1.17.3
+        version: 1.17.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(express@5.2.1)(hono@4.13.5)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6)
       dotenv:
         specifier: 17.4.2
         version: 17.4.2
@@ -1194,6 +1197,12 @@ packages:
     peerDependencies:
       '@mastra/core': '>=1.0.0-0 <2.0.0-0'
 
+  '@mastra/mcp@1.17.3':
+    resolution: {integrity: sha512-A4v+G5zKEZB0WLH18NQroPivhIB6mJph542LZywDW+NEECDaju4xS/X1bl2XNkuhpLKjhyPuZEziRI0A6eMF1A==}
+    engines: {node: '>=22.13.0'}
+    peerDependencies:
+      '@mastra/core': '>=1.64.0-0 <2.0.0-0'
+
   '@mastra/memory@1.28.2':
     resolution: {integrity: sha512-XneY2QdmC/nUjfaax7z4Qdnsw6WgsFWc1QZFd79AkQHl0g0bDvpwjQlbDZ6wnZ2YygRDCWVt0Ew3dDI2Ao3QXg==}
     engines: {node: '>=22.13.0'}
@@ -1213,9 +1222,37 @@ packages:
       '@mastra/core': '>=1.50.0-0 <2.0.0-0'
       zod: ^3.25.0 || ^4.0.0
 
+  '@modelcontextprotocol/client@2.0.0':
+    resolution: {integrity: sha512-8f1OghQ2rjzIOfqgUCP+8GiUWqRs89njoWLNqAe8kWmDePv3s1fZXseej+QXemssEuuOvLLmLO/kqM3IQHtISw==}
+    engines: {node: '>=20'}
+
   '@modelcontextprotocol/core@2.0.0':
     resolution: {integrity: sha512-pJCEwGG7Lfr/+PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG+RjhsvS1FKrDbKux+M1HhlnGWqcA==}
     engines: {node: '>=20'}
+
+  '@modelcontextprotocol/ext-apps@1.7.5':
+    resolution: {integrity: sha512-TjPH2S2y5UEGKhmI6+XGFuqfqOV4ppe1x6DA3txnUaEWkgtA4G5vo14jGKFZmegdkZ1H4QMLyujLvoU1BEdnAg==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@modelcontextprotocol/sdk': ^1.29.0
+      react: ^17.0.0 || ^18.0.0 || ^19.0.0
+      react-dom: ^17.0.0 || ^18.0.0 || ^19.0.0
+      zod: ^3.25.0 || ^4.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+
+  '@modelcontextprotocol/node@2.0.0':
+    resolution: {integrity: sha512-Y4hAC2XdGDUdDOCbLDOCA4+aL3NUldjsOWlDL/YwpAxrPhRm1xHd7lZ+mLacvZ9t3PaH28wgNoaLQGrIk1P2pg==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@modelcontextprotocol/server': ^2.0.0
+      hono: ^4.11.4
+    peerDependenciesMeta:
+      hono:
+        optional: true
 
   '@modelcontextprotocol/sdk@1.30.0':
     resolution: {integrity: sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==}
@@ -1225,6 +1262,16 @@ packages:
       zod: ^3.25 || ^4.0
     peerDependenciesMeta:
       '@cfworker/json-schema':
+        optional: true
+
+  '@modelcontextprotocol/server-legacy@2.0.0':
+    resolution: {integrity: sha512-LnffC1BSqFMHtMQxEz92lqDpHWma+ErV3ghdHDgdkCyYzVcCYKcUT5loq4kflty+Bf9C9qjJqbnphyBWyCqo8Q==}
+    engines: {node: '>=20'}
+    deprecated: This package is a frozen copy of v1's SSE transport and OAuth Authorization Server helpers for migration purposes only. Use StreamableHTTP from @modelcontextprotocol/server and a dedicated OAuth server in production. Will not receive new features.
+    peerDependencies:
+      express: ^4.18.0 || ^5.0.0
+    peerDependenciesMeta:
+      express:
         optional: true
 
   '@modelcontextprotocol/server@2.0.0':
@@ -2663,6 +2710,10 @@ packages:
   execa@9.6.1:
     resolution: {integrity: sha512-9Be3ZoN4LmYR90tUoVu2te2BsbzHfhJyfEiAVfz7N5/zv+jduIfLrV2xdQXOHbaD6KgpGdO9PRPM1Y4Q9QkPkA==}
     engines: {node: ^18.19.0 || >=20.5.0}
+
+  exit-hook@5.1.0:
+    resolution: {integrity: sha512-INjr2xyxHo7bhAqf5ong++GZPPnpcuBcaXUKt03yf7Fie9yWD7FapL4teOU0+awQazGs5ucBh7xWs/AD+6nhog==}
+    engines: {node: '>=20'}
 
   exponential-backoff@3.1.3:
     resolution: {integrity: sha512-ZgEeZXj30q+I0EN+CbSSpIyPaJ5HVQD18Z1m+u1FXbAeT94mr1zw50q4q6jiiC447Nl/YTcIYSAftiGqetwXCA==}
@@ -5944,7 +5995,7 @@ snapshots:
       - utf-8-validate
       - zod
 
-  '@mastra/editor@0.14.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(ws@8.21.3)(zod@4.3.6)':
+  '@mastra/editor@0.14.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(@mastra/mcp@1.17.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(express@5.2.1)(hono@4.13.5)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6))(ws@8.21.3)(zod@4.3.6)':
     dependencies:
       '@arcadeai/arcadejs': 2.4.1
       '@composio/core': 0.14.1(ws@8.21.3)(zod@4.3.6)
@@ -5952,6 +6003,8 @@ snapshots:
       '@mastra/core': 1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6)
       '@mastra/memory': 1.28.2(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))
       '@mastra/schema-compat': 1.3.8(zod@4.3.6)
+    optionalDependencies:
+      '@mastra/mcp': 1.17.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(express@5.2.1)(hono@4.13.5)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6)
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@smithy/hash-node'
@@ -5965,6 +6018,27 @@ snapshots:
       '@mastra/core': 1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6)
       pino: 10.3.1
       pino-pretty: 13.1.3
+
+  '@mastra/mcp@1.17.3(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))(express@5.2.1)(hono@4.13.5)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6)':
+    dependencies:
+      '@mastra/core': 1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6)
+      '@modelcontextprotocol/client': 2.0.0
+      '@modelcontextprotocol/core': 2.0.0
+      '@modelcontextprotocol/ext-apps': 1.7.5(@modelcontextprotocol/sdk@1.30.0(zod@4.3.6))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6)
+      '@modelcontextprotocol/node': 2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.13.5)
+      '@modelcontextprotocol/sdk': 1.30.0(zod@4.3.6)
+      '@modelcontextprotocol/server': 2.0.0
+      '@modelcontextprotocol/server-legacy': 2.0.0(express@5.2.1)
+      exit-hook: 5.1.0
+      fast-deep-equal: 3.1.3
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - express
+      - hono
+      - react
+      - react-dom
+      - supports-color
+      - zod
 
   '@mastra/memory@1.28.2(@mastra/core@1.64.0(ai@7.0.91(zod@4.3.6))(express@5.2.1)(zod@4.3.6))':
     dependencies:
@@ -5999,9 +6073,35 @@ snapshots:
       hono: 4.13.5
       zod: 4.3.6
 
+  '@modelcontextprotocol/client@2.0.0':
+    dependencies:
+      '@modelcontextprotocol/core': 2.0.0
+      cross-spawn: 7.0.6
+      eventsource: 3.0.7
+      eventsource-parser: 3.1.1
+      jose: 6.2.10
+      pkce-challenge: 5.0.1
+      zod: 4.3.6
+
   '@modelcontextprotocol/core@2.0.0':
     dependencies:
       zod: 4.3.6
+
+  '@modelcontextprotocol/ext-apps@1.7.5(@modelcontextprotocol/sdk@1.30.0(zod@4.3.6))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(zod@4.3.6)':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.30.0(zod@4.3.6)
+      '@standard-schema/spec': 1.1.0
+      zod: 4.3.6
+    optionalDependencies:
+      react: 19.2.1
+      react-dom: 19.2.1(react@19.2.1)
+
+  '@modelcontextprotocol/node@2.0.0(@modelcontextprotocol/server@2.0.0)(hono@4.13.5)':
+    dependencies:
+      '@hono/node-server': 1.19.10(hono@4.13.5)
+      '@modelcontextprotocol/server': 2.0.0
+    optionalDependencies:
+      hono: 4.13.5
 
   '@modelcontextprotocol/sdk@1.30.0(zod@4.3.6)':
     dependencies:
@@ -6022,6 +6122,20 @@ snapshots:
       raw-body: 3.0.2
       zod: 4.3.6
       zod-to-json-schema: 3.25.2(zod@4.3.6)
+    transitivePeerDependencies:
+      - supports-color
+
+  '@modelcontextprotocol/server-legacy@2.0.0(express@5.2.1)':
+    dependencies:
+      '@modelcontextprotocol/core': 2.0.0
+      content-type: 1.0.5
+      cors: 2.8.6
+      express-rate-limit: 8.7.0(express@5.2.1)
+      pkce-challenge: 5.0.1
+      raw-body: 3.0.2
+      zod: 4.3.6
+    optionalDependencies:
+      express: 5.2.1
     transitivePeerDependencies:
       - supports-color
 
@@ -7679,6 +7793,8 @@ snapshots:
       signal-exit: 4.1.0
       strip-final-newline: 4.0.0
       yoctocolors: 2.2.0
+
+  exit-hook@5.1.0: {}
 
   exponential-backoff@3.1.3: {}
 
