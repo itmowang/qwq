@@ -4,10 +4,20 @@ export type LoginInput = {
   password: string;
 };
 
+export type AuthenticatedUser = {
+  tenantId: string;
+  username: string;
+  displayName: string;
+  avatar?: string;
+  roleName?: string;
+  companyCode?: string;
+  edition?: string;
+};
+
 export type LoginResult =
   | {
       success: true;
-      username: string;
+      user: AuthenticatedUser;
     }
   | {
       success: false;
@@ -17,5 +27,7 @@ export type LoginResult =
 export type DesktopApi = {
   auth: {
     login: (input: LoginInput) => Promise<LoginResult>;
+    restoreSession: () => Promise<AuthenticatedUser | null>;
+    logout: () => Promise<void>;
   };
 };
