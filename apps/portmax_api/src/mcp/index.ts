@@ -3,6 +3,15 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod";
 import { forwardUpstream } from "../http/proxy.js";
 
+export type McpSessionCredentials = {
+  bladeAuth: string;
+  tenantId?: string;
+};
+
+type McpTransportOptions = {
+  getSessionCredentials?: () => McpSessionCredentials | undefined;
+};
+
 const requestSchema = {
   path: z.string().startsWith("/").describe("已配置上游服务中的路径及可选查询参数。"),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("GET"),
@@ -20,17 +29,19 @@ const outboundSchedulePageSchema = {
   selectType: z.number().int().default(0).describe("Blade 出库计划查询的选择类型。"),
 };
 
-function getOutboundScheduleBladeAuth(): string {
-  const bladeAuth = process.env.PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH?.trim();
+function getOutboundScheduleCredentials(sessionCredentials: McpSessionCredentials | undefined): McpSessionCredentials {
+  const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH?.trim();
 
   if (!bladeAuth) {
-    throw new Error("发起出库计划请求前必须配置 PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH。");
+    throw new Error(
+      "发起出库计划请求前必须在 MCP 请求中提供 X-Portmax-Blade-Auth，或配置 PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH。",
+    );
   }
 
-  return bladeAuth;
+  return { bladeAuth, tenantId: sessionCredentials?.tenantId };
 }
 
-export function createMcpTransport() {
+export function createMcpTransport(options: McpTransportOptions = {}) {
   const server = new McpServer({ name: "portmax_api", version: "0.1.0" });
 
   server.registerTool(
@@ -87,17 +98,19 @@ export function createMcpTransport() {
     },
     async ({ current, size, filter, selectType }) => {
       try {
+        const credentials = getOutboundScheduleCredentials(options.getSessionCredentials?.());
         const upstreamResponse = await forwardUpstream({
           path: "/api/blade-order/schedule/outbound/page",
           method: "POST",
           headers: {
             accept: "application/json, text/plain, */*",
-            "blade-auth": getOutboundScheduleBladeAuth(),
+            "blade-auth": credentials.bladeAuth,
             "blade-requested-with": "BladeHttpRequest",
             "content-type": "application/json",
+            ...(credentials.tenantId ? { "tenant-id": credentials.tenantId } : {}),
           },
           body: JSON.stringify({ current, size, filter, selectType }),
-          // 该接口使用 Blade-Auth，不使用通用 Authorization 请求头。
+          // 该接口使用每个 MCP session 绑定的 Blade-Auth，不使用通用 Authorization 请求头。
           authorization: "",
         });
         const text = await upstreamResponse.text();
@@ -125,7 +138,7 @@ export function createMcpTransport() {
   );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
+    sessionIdGenerator: () => crypto.randomUUID(),
     enableJsonResponse: true,
   });
 

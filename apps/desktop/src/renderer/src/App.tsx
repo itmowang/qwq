@@ -35,6 +35,119 @@ function messageText(message: UIMessage): string {
     .trim();
 }
 
+type MessagePart = UIMessage["parts"][number];
+type PartRecord = Record<string, unknown>;
+
+function partRecord(part: MessagePart): PartRecord {
+  return part as unknown as PartRecord;
+}
+
+function displayPartValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function toolLabel(part: MessagePart): string {
+  const record = partRecord(part);
+  const explicitName = record.toolName;
+
+  if (typeof explicitName === "string" && explicitName) return explicitName;
+  return part.type === "dynamic-tool" ? "工具调用" : part.type.replace(/^tool-/, "");
+}
+
+function toolStateLabel(state: unknown): string {
+  switch (state) {
+    case "input-streaming":
+      return "正在生成参数";
+    case "input-available":
+      return "准备调用";
+    case "output-available":
+      return "已完成";
+    case "output-error":
+      return "调用失败";
+    case "approval-requested":
+      return "等待确认";
+    case "approval-responded":
+      return "已确认";
+    default:
+      return "处理中";
+  }
+}
+
+function isToolCallPart(part: MessagePart): boolean {
+  return part.type === "dynamic-tool" || part.type.startsWith("tool-");
+}
+
+function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
+  const record = partRecord(part);
+  const input = displayPartValue(record.input ?? record.args);
+  const output = displayPartValue(record.output ?? record.result ?? record.toolResult ?? record.data);
+  const error = displayPartValue(record.errorText ?? record.error);
+  const isComplete = record.state === "output-available";
+  const result = output || (isComplete ? "工具调用已完成，结果已用于生成下方回答。" : "正在等待工具返回结果…");
+
+  return (
+    <section className={`tool-call tool-call--${String(record.state ?? "pending")}`}>
+      <div className="tool-call__header">
+        <span aria-hidden="true" className="tool-call__icon">⌘</span>
+        <span className="tool-call__name">{toolLabel(part)}</span>
+        <span className="tool-call__state">{toolStateLabel(record.state)}</span>
+      </div>
+      {input ? (
+        <details className="tool-call__details">
+          <summary>调用参数</summary>
+          <pre>{input}</pre>
+        </details>
+      ) : null}
+      <div className="tool-call__result">
+        <p>工具反馈</p>
+        <pre>{result}</pre>
+      </div>
+      {error ? <p className="tool-call__error">{error}</p> : null}
+    </section>
+  );
+}
+
+function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming: boolean }): React.JSX.Element | null {
+  if (part.type === "text") {
+    return (
+      <p className={isStreaming ? "message-text message-text--streaming" : "message-text"}>
+        {part.text}
+        {isStreaming ? <span aria-hidden="true" className="streaming-cursor" /> : null}
+      </p>
+    );
+  }
+
+  if (part.type === "reasoning") {
+    const text = displayPartValue(partRecord(part).text);
+    return (
+      <details className="message-reasoning" open={isStreaming}>
+        <summary><span aria-hidden="true">✦</span> 思考过程{isStreaming ? "（生成中）" : ""}</summary>
+        <div>{text || "正在整理思路…"}</div>
+      </details>
+    );
+  }
+
+  if (isToolCallPart(part)) {
+    return <ToolCallPart part={part} />;
+  }
+
+  return null;
+}
+
+function hasVisibleActivity(part: MessagePart): boolean {
+  return (part.type === "text" && part.text.length > 0)
+    || part.type === "reasoning"
+    || part.type === "dynamic-tool"
+    || part.type.startsWith("tool-");
+}
+
 function conversationTitle(messages: UIMessage[]): string {
   const firstUserMessage = messages.find((message) => message.role === "user");
   const text = firstUserMessage ? messageText(firstUserMessage) : "";
@@ -86,15 +199,44 @@ function ConversationPanel({
   onMessagesChange: (conversationId: string, messages: UIMessage[]) => void;
 }): React.JSX.Element {
   const [prompt, setPrompt] = useState("");
+  const [mcpSessionInput, setMcpSessionInput] = useState<{ bladeAuth: string; tenantId: string } | null>(null);
+  const [isLoadingMcpSessionInput, setIsLoadingMcpSessionInput] = useState(true);
   const initialMessages = useRef(conversation.messages);
   const skipInitialPersist = useRef(true);
+
+  useEffect(() => {
+    let isCurrent = true;
+
+    void window.api.auth.getMcpSessionInput().then((input) => {
+      if (!isCurrent) return;
+      setMcpSessionInput(input);
+      setIsLoadingMcpSessionInput(false);
+    });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
+
+  const transport = useMemo(
+    () =>
+      new DefaultChatTransport({
+        api: `${mastraServerUrl}/chat/portmax-assistant`,
+        headers: mcpSessionInput
+          ? {
+              "x-portmax-blade-auth": mcpSessionInput.bladeAuth,
+              "x-portmax-tenant-id": mcpSessionInput.tenantId,
+            }
+          : undefined,
+      }),
+    [mcpSessionInput],
+  );
   const { messages, setMessages, sendMessage, status, error } = useChat({
     id: conversation.id,
-    transport: new DefaultChatTransport({
-      api: `${mastraServerUrl}/chat/portmax-assistant`,
-    }),
+    transport,
   });
   const isSending = status === "submitted" || status === "streaming";
+  const canSend = Boolean(mcpSessionInput) && !isSending;
 
   useEffect(() => {
     setMessages(initialMessages.current);
@@ -117,6 +259,13 @@ function ConversationPanel({
 
     sendMessage({ text });
     setPrompt("");
+  }
+
+  function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
   }
 
   return (
@@ -144,21 +293,25 @@ function ConversationPanel({
           <div className="message-list">
             {messages.map((message) => {
               const isUser = message.role === "user";
+              const hasToolCall = !isUser && message.parts.some(isToolCallPart);
+              const isStreamingMessage = isSending && !isUser && message.id === messages[messages.length - 1]?.id;
               return (
-                <article className={`message-row ${isUser ? "message-row--user" : ""}`} key={message.id}>
+                <article className={`message-row ${isUser ? "message-row--user" : ""} ${hasToolCall ? "message-row--has-tool" : ""}`} key={message.id}>
                   <div className="message-avatar">{isUser ? "你" : "PM"}</div>
                   <div className="message-content">
                     <p className="message-author">{isUser ? "你" : "Portmax Assistant"}</p>
                     <div className="message-bubble">
                       {message.parts.map((part, index) => (
-                        part.type === "text" ? <p key={index}>{part.text}</p> : null
+                        <MessagePartView isStreaming={isStreamingMessage} key={`${part.type}-${index}`} part={part} />
                       ))}
                     </div>
                   </div>
                 </article>
               );
             })}
-            {isSending ? <p className="message-thinking">Portmax 正在思考…</p> : null}
+            {isSending && !messages.some((message) => message.parts.some(hasVisibleActivity)) ? (
+              <p className="message-thinking">Portmax 正在思考…</p>
+            ) : null}
             {error ? <p className="chat-error">{error.message}</p> : null}
           </div>
         )}
@@ -169,22 +322,29 @@ function ConversationPanel({
           <label className="sr-only" htmlFor="chat-input">消息</label>
           <textarea
             className="composer-input"
-            disabled={isSending}
+            disabled={!canSend}
             id="chat-input"
             onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={handlePromptKeyDown}
             placeholder="向 Portmax Assistant 提问…"
             rows={1}
             value={prompt}
           />
           <button
             className="primary-button composer-send"
-            disabled={!prompt.trim() || isSending}
+            disabled={!prompt.trim() || !canSend}
             type="submit"
           >
             {isSending ? "发送中" : "发送"}
           </button>
         </form>
-        <p className="composer-note">Portmax 可能会出错，请核查重要信息。</p>
+        <p className="composer-note">
+          {isLoadingMcpSessionInput
+            ? "正在验证登录凭据…"
+            : !mcpSessionInput
+              ? "登录凭据不可用或已过期，请重新登录。"
+              : "Enter 发送 · Shift + Enter 换行 · Portmax 可能会出错，请核查重要信息。"}
+        </p>
       </div>
     </>
   );

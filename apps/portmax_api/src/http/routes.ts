@@ -10,11 +10,13 @@ const tokenRequestSchema = z.object({
   type: z.string().trim().min(1).max(64).default("account"),
 });
 
-function getBladeOAuthAuthorization(): string {
-  const authorization = process.env.PORTMAX_BLADE_OAUTH_AUTHORIZATION?.trim();
+const defaultBladeOAuthAuthorization = "Basic c2FiZXI6c2FiZXJfc2VjcmV0";
 
-  if (!authorization?.startsWith("Basic ")) {
-    throw new Error("PORTMAX_BLADE_OAUTH_AUTHORIZATION must contain the Blade OAuth Basic credential.");
+function getBladeOAuthAuthorization(): string {
+  const authorization = process.env.PORTMAX_BLADE_OAUTH_AUTHORIZATION?.trim() || defaultBladeOAuthAuthorization;
+
+  if (!authorization.startsWith("Basic ")) {
+    throw new Error("PORTMAX_BLADE_OAUTH_AUTHORIZATION must contain the upstream Basic client credential.");
   }
 
   return authorization;
@@ -23,11 +25,8 @@ function getBladeOAuthAuthorization(): string {
 export const httpRoutes = new Hono();
 
 /**
- * Blade OAuth 用户名密码登录接口。
- *
- * 对应上游 `POST /api/blade-auth/oauth/token`：固定使用 password grant，
- * 将 tenantId、username、password、scope、type 转为上游查询参数，
- * 并只从服务端环境变量注入 OAuth Basic 客户端凭据。
+ * 上游 OAuth password-grant 登录代理。
+ * 将 desktop 提交的租户、用户名和密码转为上游查询参数，并从服务端环境变量注入 Basic 客户端凭据。
  */
 httpRoutes.post("/auth/token", async (c) => {
   if (!c.req.header("content-type")?.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
@@ -70,6 +69,8 @@ httpRoutes.post("/auth/token", async (c) => {
     return c.json({ error: message }, 502);
   }
 });
+
+
 
 httpRoutes.all("/proxy/*", async (c) => {
   const path = c.req.path.slice("/proxy".length);

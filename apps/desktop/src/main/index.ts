@@ -141,9 +141,11 @@ async function authenticationFailure(response: Response): Promise<LoginResult> {
     ) {
       return {
         success: false,
-        message: "认证代理尚未配置 OAuth 客户端凭据。请设置 PORTMAX_BLADE_OAUTH_AUTHORIZATION 后重启 portmax_api。",
+        message: "登录代理缺少上游 Basic 客户端凭据，请配置 PORTMAX_BLADE_OAUTH_AUTHORIZATION 后重启 portmax_api。",
       };
     }
+
+    return { success: false, message: "登录代理的上游暂时不可用，请稍后重试。" };
   }
 
   return { success: false, message: "认证服务的上游暂时不可用，请稍后重试。" };
@@ -281,6 +283,27 @@ function createWindow(): void {
     return restoreSession();
   });
 
+  ipcMain.handle("auth:get-mcp-session-input", async (event) => {
+    if (event.sender !== mainWindow.webContents || !safeStorage.isEncryptionAvailable()) return null;
+
+    try {
+      const encryptedSession = await readFile(sessionFilePath());
+      const parsed: unknown = JSON.parse(safeStorage.decryptString(encryptedSession));
+      if (!isPersistedSession(parsed) || parsed.expiresAt <= Date.now()) {
+        await clearSavedSession();
+        return null;
+      }
+
+      return {
+        bladeAuth: parsed.accessToken,
+        tenantId: parsed.user.tenantId,
+      };
+    } catch {
+      await clearSavedSession().catch(() => undefined);
+      return null;
+    }
+  });
+
   ipcMain.handle("auth:logout", async (event) => {
     if (event.sender !== mainWindow.webContents) return;
     await clearSavedSession();
@@ -289,6 +312,7 @@ function createWindow(): void {
   mainWindow.on("closed", () => {
     ipcMain.removeHandler("auth:login");
     ipcMain.removeHandler("auth:restore-session");
+    ipcMain.removeHandler("auth:get-mcp-session-input");
     ipcMain.removeHandler("auth:logout");
   });
 
