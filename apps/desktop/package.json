@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Portmax Electron chat client for the local Mastra server",
   "main": "./out/main/index.js",
