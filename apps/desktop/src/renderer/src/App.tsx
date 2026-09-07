@@ -3,9 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChat, type UIMessage } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import type { AuthenticatedUser } from "../../shared/auth";
-
-const mastraServerUrl = import.meta.env.VITE_MASTRA_SERVER_URL ?? "http://localhost:4111";
+import type { AuthenticatedUser, ServiceEndpoints } from "../../shared/auth";
 
 type Credentials = {
   tenantId: string;
@@ -215,6 +213,7 @@ function ConversationPanel({
 }): React.JSX.Element {
   const [prompt, setPrompt] = useState("");
   const [mcpSessionInput, setMcpSessionInput] = useState<{ bladeAuth: string; tenantId: string } | null>(null);
+  const [serviceEndpoints, setServiceEndpoints] = useState<ServiceEndpoints | null>(null);
   const [isLoadingMcpSessionInput, setIsLoadingMcpSessionInput] = useState(true);
   const initialMessages = useRef(conversation.messages);
   const skipInitialPersist = useRef(true);
@@ -224,9 +223,18 @@ function ConversationPanel({
   useEffect(() => {
     let isCurrent = true;
 
-    void window.api.auth.getMcpSessionInput().then((input) => {
+    void Promise.all([
+      window.api.auth.getMcpSessionInput(),
+      window.api.server.getEndpoints(),
+    ]).then(([sessionInput, endpoints]) => {
       if (!isCurrent) return;
-      setMcpSessionInput(input);
+      setMcpSessionInput(sessionInput);
+      setServiceEndpoints(endpoints);
+      setIsLoadingMcpSessionInput(false);
+    }).catch(() => {
+      if (!isCurrent) return;
+      setMcpSessionInput(null);
+      setServiceEndpoints(null);
       setIsLoadingMcpSessionInput(false);
     });
 
@@ -238,7 +246,7 @@ function ConversationPanel({
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
-        api: `${mastraServerUrl}/chat/portmax-assistant`,
+        api: `${serviceEndpoints?.mastraServerUrl ?? "http://localhost:4111"}/chat/portmax-assistant`,
         headers: mcpSessionInput
           ? {
               "x-portmax-blade-auth": mcpSessionInput.bladeAuth,
@@ -246,14 +254,14 @@ function ConversationPanel({
             }
           : undefined,
       }),
-    [mcpSessionInput],
+    [mcpSessionInput, serviceEndpoints],
   );
   const { messages, setMessages, sendMessage, status, error } = useChat({
     id: conversation.id,
     transport,
   });
   const isSending = status === "submitted" || status === "streaming";
-  const canSend = Boolean(mcpSessionInput) && !isSending;
+  const canSend = Boolean(mcpSessionInput && serviceEndpoints) && !isSending;
   const scrollToBottom = useCallback((): void => {
     const container = scrollContainerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
@@ -376,7 +384,7 @@ function ConversationPanel({
           {isLoadingMcpSessionInput
             ? "正在验证登录凭据…"
             : !mcpSessionInput
-              ? "登录凭据不可用或已过期，请重新登录。"
+              ? "登录凭据或工作区服务不可用，请重新登录后重试。"
               : "Enter 发送 · Shift + Enter 换行 · Portmax 可能会出错，请核查重要信息。"}
         </p>
       </div>
@@ -485,7 +493,7 @@ function ChatHome({ user, onLogout }: { user: AuthenticatedUser; onLogout: () =>
         <header className="workspace-header">
           <div className="workspace-title">
             <p className="workspace-title__name">{activeConversation.title}</p>
-            <p className="workspace-title__meta">本机 Mastra 服务 · 已就绪</p>
+            <p className="workspace-title__meta">Mastra 服务 · 已就绪</p>
           </div>
           <div className="user-card">
             <Avatar size="sm" user={user} />

@@ -2,6 +2,9 @@ appId: com.portmax.desktop
 productName: Portmax Desktop
 directories:
   buildResources: build
+extraResources:
+  - from: resources/portmax-endpoints.json
+    to: portmax-endpoints.json
 files:
   - '!**/.vscode/*'
   - '!src/*'

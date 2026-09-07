@@ -4,9 +4,14 @@ import { join } from "path";
 import { app, BrowserWindow, ipcMain, Menu, safeStorage } from "electron";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import icon from "../../resources/icon.png?asset";
-import type { AuthenticatedUser, LoginInput, LoginResult } from "../shared/auth";
+import type { AuthenticatedUser, LoginInput, LoginResult, ServiceEndpoints } from "../shared/auth";
 
-const defaultAuthServerUrl = "http://localhost:3001";
+const endpointConfigFileName = "portmax-endpoints.json";
+const defaultServiceEndpoints: ServiceEndpoints = {
+  mastraServerUrl: "http://localhost:4111",
+  portmaxApiUrl: "http://localhost:3001",
+};
+let serviceEndpoints = defaultServiceEndpoints;
 const sessionFileName = "portmax-session.bin";
 
 type PersistedSession = {
@@ -20,6 +25,46 @@ type PersistedSession = {
 type ParsedLoginSession =
   | { session: PersistedSession }
   | { message: string };
+
+function normalizeServiceUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function parseServiceEndpoints(value: unknown): ServiceEndpoints | null {
+  if (!value || typeof value !== "object") return null;
+
+  const config = value as Record<string, unknown>;
+  const mastraServerUrl = normalizeServiceUrl(config.mastraServerUrl);
+  const portmaxApiUrl = normalizeServiceUrl(config.portmaxApiUrl);
+
+  return mastraServerUrl && portmaxApiUrl ? { mastraServerUrl, portmaxApiUrl } : null;
+}
+
+async function loadServiceEndpoints(): Promise<ServiceEndpoints> {
+  const bundledConfigPath = app.isPackaged
+    ? join(process.resourcesPath, endpointConfigFileName)
+    : join(app.getAppPath(), "resources", endpointConfigFileName);
+  const configPaths = [join(app.getPath("userData"), endpointConfigFileName), bundledConfigPath];
+
+  for (const configPath of configPaths) {
+    try {
+      const config = parseServiceEndpoints(JSON.parse(await readFile(configPath, "utf8")));
+      if (config) return config;
+    } catch {
+      // Try the next config source. User data overrides the installer default when present.
+    }
+  }
+
+  return defaultServiceEndpoints;
+}
 
 function isLoginInput(value: unknown): value is LoginInput {
   if (!value || typeof value !== "object") return false;
@@ -39,7 +84,7 @@ function isLoginInput(value: unknown): value is LoginInput {
 }
 
 function getAuthEndpoint(): URL {
-  const baseUrl = process.env.PORTMAX_API_URL ?? defaultAuthServerUrl;
+  const baseUrl = process.env.PORTMAX_API_URL ?? serviceEndpoints.portmaxApiUrl;
   const endpoint = new URL("/auth/token", baseUrl);
 
   if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
@@ -304,6 +349,11 @@ function createWindow(): void {
     }
   });
 
+  ipcMain.handle("server:get-endpoints", (event) => {
+    if (event.sender !== mainWindow.webContents) return null;
+    return serviceEndpoints;
+  });
+
   ipcMain.handle("auth:logout", async (event) => {
     if (event.sender !== mainWindow.webContents) return;
     await clearSavedSession();
@@ -313,6 +363,7 @@ function createWindow(): void {
     ipcMain.removeHandler("auth:login");
     ipcMain.removeHandler("auth:restore-session");
     ipcMain.removeHandler("auth:get-mcp-session-input");
+    ipcMain.removeHandler("server:get-endpoints");
     ipcMain.removeHandler("auth:logout");
   });
 
@@ -323,9 +374,10 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   electronApp.setAppUserModelId("com.portmax.desktop");
   Menu.setApplicationMenu(null);
+  serviceEndpoints = await loadServiceEndpoints();
 
   app.on("browser-window-created", (_, window) => optimizer.watchWindowShortcuts(window));
   createWindow();

@@ -20,6 +20,12 @@ export type McpSessionInput = {
   tenantId: string;
 };
 
+/** Non-secret endpoints used by the packaged desktop client. */
+export type ServiceEndpoints = {
+  mastraServerUrl: string;
+  portmaxApiUrl: string;
+};
+
 export type LoginResult =
   | {
       success: true;
@@ -36,5 +42,8 @@ export type DesktopApi = {
     restoreSession: () => Promise<AuthenticatedUser | null>;
     getMcpSessionInput: () => Promise<McpSessionInput | null>;
     logout: () => Promise<void>;
+  };
+  server: {
+    getEndpoints: () => Promise<ServiceEndpoints | null>;
   };
 };
