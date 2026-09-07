@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useChat, type UIMessage } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import type { AuthenticatedUser } from "../../shared/auth";
@@ -85,6 +87,7 @@ function isToolCallPart(part: MessagePart): boolean {
 }
 
 function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
+  const [isExpanded, setIsExpanded] = useState(true);
   const record = partRecord(part);
   const input = displayPartValue(record.input ?? record.args);
   const output = displayPartValue(record.output ?? record.result ?? record.toolResult ?? record.data);
@@ -98,18 +101,30 @@ function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
         <span aria-hidden="true" className="tool-call__icon">⌘</span>
         <span className="tool-call__name">{toolLabel(part)}</span>
         <span className="tool-call__state">{toolStateLabel(record.state)}</span>
+        <button
+          aria-expanded={isExpanded}
+          className="tool-call__toggle"
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+          type="button"
+        >
+          {isExpanded ? "收起" : "展开"}
+        </button>
       </div>
-      {input ? (
-        <details className="tool-call__details">
-          <summary>调用参数</summary>
-          <pre>{input}</pre>
-        </details>
+      {isExpanded ? (
+        <div className="tool-call__body">
+          {input ? (
+            <details className="tool-call__details">
+              <summary>调用参数</summary>
+              <pre>{input}</pre>
+            </details>
+          ) : null}
+          <div className="tool-call__result">
+            <p>工具反馈</p>
+            <pre>{result}</pre>
+          </div>
+          {error ? <p className="tool-call__error">{error}</p> : null}
+        </div>
       ) : null}
-      <div className="tool-call__result">
-        <p>工具反馈</p>
-        <pre>{result}</pre>
-      </div>
-      {error ? <p className="tool-call__error">{error}</p> : null}
     </section>
   );
 }
@@ -117,10 +132,10 @@ function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
 function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming: boolean }): React.JSX.Element | null {
   if (part.type === "text") {
     return (
-      <p className={isStreaming ? "message-text message-text--streaming" : "message-text"}>
-        {part.text}
+      <div className={isStreaming ? "message-markdown message-markdown--streaming" : "message-markdown"}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{part.text}</ReactMarkdown>
         {isStreaming ? <span aria-hidden="true" className="streaming-cursor" /> : null}
-      </p>
+      </div>
     );
   }
 
@@ -203,6 +218,8 @@ function ConversationPanel({
   const [isLoadingMcpSessionInput, setIsLoadingMcpSessionInput] = useState(true);
   const initialMessages = useRef(conversation.messages);
   const skipInitialPersist = useRef(true);
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   useEffect(() => {
     let isCurrent = true;
@@ -237,6 +254,22 @@ function ConversationPanel({
   });
   const isSending = status === "submitted" || status === "streaming";
   const canSend = Boolean(mcpSessionInput) && !isSending;
+  const scrollToBottom = useCallback((): void => {
+    const container = scrollContainerRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!shouldAutoScrollRef.current) return;
+
+    const animationFrame = requestAnimationFrame(scrollToBottom);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [messages, scrollToBottom, status]);
+
+  function handleConversationScroll(event: React.UIEvent<HTMLElement>): void {
+    const { clientHeight, scrollHeight, scrollTop } = event.currentTarget;
+    shouldAutoScrollRef.current = scrollHeight - scrollTop - clientHeight < 48;
+  }
 
   useEffect(() => {
     setMessages(initialMessages.current);
@@ -255,8 +288,9 @@ function ConversationPanel({
     event.preventDefault();
     const text = prompt.trim();
 
-    if (!text || isSending) return;
+    if (!text || !canSend) return;
 
+    shouldAutoScrollRef.current = true;
     sendMessage({ text });
     setPrompt("");
   }
@@ -270,7 +304,7 @@ function ConversationPanel({
 
   return (
     <>
-      <section className="conversation-scroll" aria-live="polite">
+      <section className="conversation-scroll" aria-live="polite" onScroll={handleConversationScroll} ref={scrollContainerRef}>
         {messages.length === 0 ? (
           <div className="conversation-empty">
             <div className="conversation-empty__mark" aria-hidden="true">✦</div>
