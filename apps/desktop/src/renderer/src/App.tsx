@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChat, type UIMessage } from "@ai-sdk/react";
@@ -36,7 +36,48 @@ function messageText(message: UIMessage): string {
 }
 
 type MessagePart = UIMessage["parts"][number];
+type FileMessagePart = Extract<MessagePart, { type: "file" }>;
+type PendingAttachment = FileMessagePart & { size: number };
 type PartRecord = Record<string, unknown>;
+
+const maxAttachmentsPerMessage = 3;
+const maxAttachmentSizeBytes = 4 * 1024 * 1024;
+const maxAttachmentTotalBytes = 8 * 1024 * 1024;
+const supportedAttachmentTypes = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+} as const;
+const attachmentInputAccept = Object.keys(supportedAttachmentTypes).join(",");
+
+function fileExtension(filename: string): string {
+  const extensionStart = filename.lastIndexOf(".");
+  return extensionStart < 0 ? "" : filename.slice(extensionStart).toLowerCase();
+}
+
+function attachmentMediaType(file: File): string | null {
+  return supportedAttachmentTypes[fileExtension(file.name) as keyof typeof supportedAttachmentTypes] ?? null;
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取附件。"));
+    reader.readAsDataURL(file);
+  });
+}
 
 function partRecord(part: MessagePart): PartRecord {
   return part as unknown as PartRecord;
@@ -127,6 +168,28 @@ function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
   );
 }
 
+function FileMessagePartView({ part }: { part: FileMessagePart }): React.JSX.Element {
+  const filename = part.filename || "未命名附件";
+  const isImage = part.mediaType.startsWith("image/");
+
+  return (
+    <a
+      className={`message-attachment ${isImage ? "message-attachment--image" : ""}`}
+      download={filename}
+      href={part.url}
+      rel="noreferrer"
+      target="_blank"
+      title={`打开 ${filename}`}
+    >
+      {isImage ? <img alt={filename} className="message-attachment__preview" src={part.url} /> : <span aria-hidden="true" className="message-attachment__icon">▣</span>}
+      <span className="message-attachment__details">
+        <span className="message-attachment__name">{filename}</span>
+        <span className="message-attachment__type">{part.mediaType}</span>
+      </span>
+    </a>
+  );
+}
+
 function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming: boolean }): React.JSX.Element | null {
   if (part.type === "text") {
     return (
@@ -147,6 +210,10 @@ function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming
     );
   }
 
+  if (part.type === "file") {
+    return <FileMessagePartView part={part} />;
+  }
+
   if (isToolCallPart(part)) {
     return <ToolCallPart part={part} />;
   }
@@ -156,6 +223,7 @@ function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming
 
 function hasVisibleActivity(part: MessagePart): boolean {
   return (part.type === "text" && part.text.length > 0)
+    || part.type === "file"
     || part.type === "reasoning"
     || part.type === "dynamic-tool"
     || part.type.startsWith("tool-");
@@ -164,8 +232,9 @@ function hasVisibleActivity(part: MessagePart): boolean {
 function conversationTitle(messages: UIMessage[]): string {
   const firstUserMessage = messages.find((message) => message.role === "user");
   const text = firstUserMessage ? messageText(firstUserMessage) : "";
+  const firstFile = firstUserMessage?.parts.find((part): part is FileMessagePart => part.type === "file");
 
-  if (!text) return "新对话";
+  if (!text) return firstFile?.filename ? `附件：${firstFile.filename}` : "新对话";
   return text.length > 22 ? `${text.slice(0, 22)}…` : text;
 }
 
@@ -212,11 +281,14 @@ function ConversationPanel({
   onMessagesChange: (conversationId: string, messages: UIMessage[]) => void;
 }): React.JSX.Element {
   const [prompt, setPrompt] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [mcpSessionInput, setMcpSessionInput] = useState<{ bladeAuth: string; tenantId: string } | null>(null);
   const [serviceEndpoints, setServiceEndpoints] = useState<ServiceEndpoints | null>(null);
   const [chatProxyUrl, setChatProxyUrl] = useState<string | null>(null);
   const [isLoadingMcpSessionInput, setIsLoadingMcpSessionInput] = useState(true);
   const initialMessages = useRef(conversation.messages);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const skipInitialPersist = useRef(true);
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -296,15 +368,83 @@ function ConversationPanel({
     onMessagesChange(conversation.id, messages);
   }, [conversation.id, messages, onMessagesChange]);
 
+  async function handleAttachmentSelection(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (files.length === 0 || !canSend) return;
+
+    const nextAttachments: PendingAttachment[] = [];
+    const errors: string[] = [];
+    let totalSize = pendingAttachments.reduce((sum, attachment) => sum + attachment.size, 0);
+
+    for (const file of files) {
+      const mediaType = attachmentMediaType(file);
+      if (!mediaType) {
+        errors.push(`${file.name} 不是支持的附件类型。`);
+        continue;
+      }
+      if (file.size === 0) {
+        errors.push(`${file.name} 是空文件。`);
+        continue;
+      }
+      if (file.size > maxAttachmentSizeBytes) {
+        errors.push(`${file.name} 超过单个附件 ${formatFileSize(maxAttachmentSizeBytes)} 的限制。`);
+        continue;
+      }
+      if (pendingAttachments.length + nextAttachments.length >= maxAttachmentsPerMessage) {
+        errors.push(`每条消息最多添加 ${maxAttachmentsPerMessage} 个附件。`);
+        break;
+      }
+      if (totalSize + file.size > maxAttachmentTotalBytes) {
+        errors.push(`附件总大小不能超过 ${formatFileSize(maxAttachmentTotalBytes)}。`);
+        break;
+      }
+      if ([...pendingAttachments, ...nextAttachments].some((attachment) => attachment.filename === file.name && attachment.size === file.size)) {
+        errors.push(`${file.name} 已添加。`);
+        continue;
+      }
+
+      try {
+        nextAttachments.push({
+          type: "file",
+          filename: file.name,
+          mediaType,
+          size: file.size,
+          url: await readFileAsDataUrl(file),
+        });
+        totalSize += file.size;
+      } catch {
+        errors.push(`无法读取 ${file.name}。`);
+      }
+    }
+
+    if (nextAttachments.length > 0) {
+      setPendingAttachments((current) => [...current, ...nextAttachments]);
+    }
+    setAttachmentError(errors[0] ?? null);
+  }
+
+  function removeAttachment(url: string): void {
+    if (isSending) return;
+    setPendingAttachments((current) => current.filter((attachment) => attachment.url !== url));
+    setAttachmentError(null);
+  }
+
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     const text = prompt.trim();
 
-    if (!text || !canSend) return;
+    if ((!text && pendingAttachments.length === 0) || !canSend) return;
 
     shouldAutoScrollRef.current = true;
-    sendMessage({ text });
+    if (pendingAttachments.length > 0) {
+      void sendMessage(text ? { text, files: pendingAttachments } : { files: pendingAttachments });
+    } else {
+      void sendMessage({ text });
+    }
     setPrompt("");
+    setPendingAttachments([]);
+    setAttachmentError(null);
   }
 
   function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
@@ -365,6 +505,27 @@ function ConversationPanel({
 
       <div className="composer-region">
         <form className="composer" onSubmit={submit}>
+          <input
+            accept={attachmentInputAccept}
+            className="attachment-file-input"
+            disabled={!canSend}
+            multiple
+            onChange={(event) => void handleAttachmentSelection(event)}
+            ref={attachmentInputRef}
+            tabIndex={-1}
+            type="file"
+          />
+          <button
+            aria-label="添加附件"
+            className="composer-attachment-button"
+            disabled={!canSend}
+            onClick={() => attachmentInputRef.current?.click()}
+            title="添加图片、Excel 或 Word（DOCX）附件"
+            type="button"
+          >
+            <span aria-hidden="true">⌕</span>
+            附件
+          </button>
           <label className="sr-only" htmlFor="chat-input">消息</label>
           <textarea
             className="composer-input"
@@ -378,18 +539,44 @@ function ConversationPanel({
           />
           <button
             className="primary-button composer-send"
-            disabled={!prompt.trim() || !canSend}
+            disabled={(!prompt.trim() && pendingAttachments.length === 0) || !canSend}
             type="submit"
           >
             {isSending ? "发送中" : "发送"}
           </button>
         </form>
+        {pendingAttachments.length > 0 ? (
+          <div className="attachment-list" aria-label="待发送附件">
+            {pendingAttachments.map((attachment) => {
+              const isImage = attachment.mediaType.startsWith("image/");
+              return (
+                <div className="attachment-chip" key={attachment.url}>
+                  {isImage ? <img alt="" className="attachment-chip__preview" src={attachment.url} /> : <span aria-hidden="true" className="attachment-chip__icon">▣</span>}
+                  <span className="attachment-chip__details">
+                    <span className="attachment-chip__name">{attachment.filename}</span>
+                    <span className="attachment-chip__size">{formatFileSize(attachment.size)}</span>
+                  </span>
+                  <button
+                    aria-label={`移除 ${attachment.filename ?? "附件"}`}
+                    className="attachment-chip__remove"
+                    disabled={isSending}
+                    onClick={() => removeAttachment(attachment.url)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        {attachmentError ? <p className="attachment-error" role="alert">{attachmentError}</p> : null}
         <p className="composer-note">
           {isLoadingMcpSessionInput
             ? "正在验证登录凭据…"
             : !mcpSessionInput
               ? "登录凭据或工作区服务不可用，请重新登录后重试。"
-              : "Enter 发送 · Shift + Enter 换行 · Portmax 可能会出错，请核查重要信息。"}
+              : `可添加图片、Excel、Word（DOCX）（最多 ${maxAttachmentsPerMessage} 个，总计 ${formatFileSize(maxAttachmentTotalBytes)}）· Enter 发送 · Shift + Enter 换行`}
         </p>
       </div>
     </>

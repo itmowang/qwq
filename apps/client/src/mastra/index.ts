@@ -1,8 +1,8 @@
-import { chatRoute } from "@mastra/ai-sdk";
 import { Mastra } from "@mastra/core/mastra";
 import { MastraEditor } from "@mastra/editor";
 import { MCPServer } from "@mastra/mcp";
 import { portmaxAssistant } from "./agents/portmax-assistant.js";
+import { portmaxChatRoute } from "./chat/portmax-chat-route.js";
 import { portmaxTools } from "./mcp/client.js";
 import { getCurrentTime } from "./tools/current-time.js";
 
@@ -71,6 +71,6 @@ export const mastra = new Mastra({
         handler: (c, next) => addPortmaxRequestContext(c, next, false),
       },
     ],
-    apiRoutes: [chatRoute({ path: "/chat/:agentId" })],
+    apiRoutes: [portmaxChatRoute],
   },
 });

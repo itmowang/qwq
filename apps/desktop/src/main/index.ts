@@ -17,6 +17,7 @@ let serviceEndpoints = defaultServiceEndpoints;
 let chatProxyServer: Server | null = null;
 let chatProxyUrl: string | null = null;
 const sessionFileName = "portmax-session.bin";
+const maxChatRequestBytes = 16 * 1024 * 1024;
 
 type PersistedSession = {
   version: 1;
@@ -84,14 +85,24 @@ function setChatProxyCors(request: IncomingMessage, response: ServerResponse): v
   response.setHeader("vary", "Origin");
 }
 
+class ChatRequestTooLargeError extends Error {
+  constructor() {
+    super("Chat request body exceeds the 16 MiB attachment limit.");
+  }
+}
+
 async function readChatRequestBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
 
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > maxChatRequestBytes) throw new ChatRequestTooLargeError();
+    chunks.push(buffer);
   }
 
-  return Buffer.concat(chunks);
+  return Buffer.concat(chunks, totalBytes);
 }
 
 async function forwardChatRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -136,6 +147,13 @@ async function forwardChatRequest(request: IncomingMessage, response: ServerResp
       response.end();
     }
   } catch (error) {
+    if (error instanceof ChatRequestTooLargeError) {
+      response.writeHead(413, { "content-type": "application/json" }).end(JSON.stringify({
+        error: "附件或聊天记录超过 16 MiB 限制。请减少附件数量或新建对话后重试。",
+      }));
+      return;
+    }
+
     const detail = error instanceof Error ? error.message : "Unknown proxy error.";
     console.error("Local chat proxy request failed.", detail);
     response.setHeader("x-portmax-chat-proxy-error", detail);
