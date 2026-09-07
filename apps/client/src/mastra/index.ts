@@ -1,12 +1,52 @@
 import { chatRoute } from "@mastra/ai-sdk";
 import { Mastra } from "@mastra/core/mastra";
 import { MastraEditor } from "@mastra/editor";
+import { MCPServer } from "@mastra/mcp";
 import { portmaxAssistant } from "./agents/portmax-assistant.js";
+import { portmaxTools } from "./mcp/client.js";
+import { getCurrentTime } from "./tools/current-time.js";
 
 const maxCredentialLength = 4096;
+const maxTenantIdLength = 128;
+
+// Register both local tools and Portmax tools discovered from 3001/mcp. This makes
+// the identical tool set available through http://localhost:4111/api/mcp/local-tools/mcp.
+const localToolsMcpServer = new MCPServer({
+  id: "local-tools",
+  name: "Portmax Tools",
+  version: "0.1.0",
+  tools: { getCurrentTime, ...portmaxTools },
+});
+
+async function addPortmaxRequestContext(c: any, next: () => Promise<void>, requireBladeAuth: boolean) {
+  const rawBladeAuth = c.req.header("x-portmax-blade-auth");
+  const bladeAuth = rawBladeAuth?.trim();
+  if (rawBladeAuth !== undefined && (!bladeAuth || bladeAuth.length > maxCredentialLength)) {
+    return c.json({ error: "A valid Portmax MCP credential is required." }, 401);
+  }
+  if (requireBladeAuth && !bladeAuth) {
+    return c.json({ error: "A valid Portmax MCP credential is required." }, 401);
+  }
+
+  const tenantId = c.req.header("x-portmax-tenant-id")?.trim();
+  if (tenantId && tenantId.length > maxTenantIdLength) {
+    return c.json({ error: "Invalid X-Portmax-Tenant-Id header." }, 400);
+  }
+
+  const requestContext = c.get("requestContext");
+  if (bladeAuth) {
+    requestContext.set("portmax-blade-auth", bladeAuth);
+  }
+  if (tenantId) {
+    requestContext.set("portmax-tenant-id", tenantId);
+  }
+
+  await next();
+}
 
 export const mastra = new Mastra({
   agents: { portmaxAssistant },
+  mcpServers: { "local-tools": localToolsMcpServer },
   editor: new MastraEditor({
     source: "code",
     codePath: "./mastra/editor",
@@ -22,21 +62,13 @@ export const mastra = new Mastra({
     middleware: [
       {
         path: "/chat/*",
-        handler: async (c, next) => {
-          const bladeAuth = c.req.header("x-portmax-blade-auth")?.trim();
-          if (!bladeAuth || bladeAuth.length > maxCredentialLength) {
-            return c.json({ error: "A valid Portmax MCP credential is required." }, 401);
-          }
-
-          const requestContext = c.get("requestContext");
-          requestContext.set("portmax-blade-auth", bladeAuth);
-          const tenantId = c.req.header("x-portmax-tenant-id")?.trim();
-          if (tenantId && tenantId.length <= 128) {
-            requestContext.set("portmax-tenant-id", tenantId);
-          }
-
-          await next();
-        },
+        handler: (c, next) => addPortmaxRequestContext(c, next, true),
+      },
+      {
+        // Tool discovery remains public; calls to Portmax tools can provide these
+        // headers and they will be forwarded by the MCP client to portmax_api.
+        path: "/mcp/*",
+        handler: (c, next) => addPortmaxRequestContext(c, next, false),
       },
     ],
     apiRoutes: [chatRoute({ path: "/chat/:agentId" })],

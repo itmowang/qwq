@@ -32,3 +32,7 @@ export const mcpClient = new MCPClient({
     },
   },
 });
+
+// The same remote tools are shared by the Agent and the 4111 MCP server.
+// This avoids exposing a different tool set through each integration surface.
+export const portmaxTools = await mcpClient.listTools();

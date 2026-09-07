@@ -1,8 +1,6 @@
 import { Agent } from "@mastra/core/agent";
-import { mcpClient } from "../mcp/client.js";
+import { portmaxTools } from "../mcp/client.js";
 import { getCurrentTime } from "../tools/current-time.js";
-
-const portmaxTools = await mcpClient.listTools();
 
 export const portmaxAssistant = new Agent({
   id: "portmax-assistant",
