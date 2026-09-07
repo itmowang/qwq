@@ -13,7 +13,8 @@ export const mastra = new Mastra({
   }),
   server: {
     cors: {
-      origin: ["http://localhost:5173", "null"],
+      // Electron production windows are loaded from file://; development and legacy builds use the other origins.
+      origin: ["http://localhost:5173", "null", "file://"],
       allowMethods: ["*"],
       allowHeaders: ["*"],
     },
