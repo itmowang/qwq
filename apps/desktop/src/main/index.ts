@@ -79,8 +79,19 @@ function setChatProxyCors(request: IncomingMessage, response: ServerResponse): v
 
   response.setHeader("access-control-allow-methods", "POST, OPTIONS");
   response.setHeader("access-control-allow-headers", "content-type, x-portmax-blade-auth, x-portmax-tenant-id");
-  response.setHeader("access-control-expose-headers", "x-vercel-ai-ui-message-stream");
+  response.setHeader("access-control-allow-private-network", "true");
+  response.setHeader("access-control-expose-headers", "x-vercel-ai-ui-message-stream, x-portmax-chat-proxy-error");
   response.setHeader("vary", "Origin");
+}
+
+async function readChatRequestBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  return Buffer.concat(chunks);
 }
 
 async function forwardChatRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -104,12 +115,12 @@ async function forwardChatRequest(request: IncomingMessage, response: ServerResp
       }
     }
 
+    const requestBody = (await readChatRequestBody(request)).toString("utf8");
     const upstreamResponse = await fetch(new URL(request.url, serviceEndpoints.mastraServerUrl), {
       method: "POST",
       headers: upstreamHeaders,
-      body: Readable.toWeb(request) as never,
-      duplex: "half",
-    } as RequestInit & { duplex: "half" });
+      body: requestBody,
+    });
 
     for (const [name, value] of upstreamResponse.headers) {
       if (!['connection', 'keep-alive', 'transfer-encoding'].includes(name.toLowerCase())) {
@@ -124,8 +135,11 @@ async function forwardChatRequest(request: IncomingMessage, response: ServerResp
     } else {
       response.end();
     }
-  } catch {
-    response.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ error: "Chat service is unavailable." }));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Unknown proxy error.";
+    console.error("Local chat proxy request failed.", detail);
+    response.setHeader("x-portmax-chat-proxy-error", detail);
+    response.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ error: "Chat service is unavailable.", detail }));
   }
 }
 
@@ -389,12 +403,20 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: true,
     },
   });
 
   mainWindow.on("ready-to-show", () => mainWindow.show());
   mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const isDevToolsShortcut = input.key === "F12" || (input.control && input.shift && input.key.toLowerCase() === "i");
+    if (!isDevToolsShortcut) return;
+
+    mainWindow.webContents.toggleDevTools();
+    event.preventDefault();
+  });
 
   ipcMain.handle("auth:login", (event, input: unknown) => {
     if (event.sender !== mainWindow.webContents) {
