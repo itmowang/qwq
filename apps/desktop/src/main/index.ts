@@ -1,6 +1,8 @@
 import { createHash } from "crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
 import { readFile, unlink, writeFile } from "fs/promises";
 import { join } from "path";
+import { Readable } from "stream";
 import { app, BrowserWindow, ipcMain, Menu, safeStorage } from "electron";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import icon from "../../resources/icon.png?asset";
@@ -12,6 +14,8 @@ const defaultServiceEndpoints: ServiceEndpoints = {
   portmaxApiUrl: "http://localhost:3001",
 };
 let serviceEndpoints = defaultServiceEndpoints;
+let chatProxyServer: Server | null = null;
+let chatProxyUrl: string | null = null;
 const sessionFileName = "portmax-session.bin";
 
 type PersistedSession = {
@@ -64,6 +68,83 @@ async function loadServiceEndpoints(): Promise<ServiceEndpoints> {
   }
 
   return defaultServiceEndpoints;
+}
+
+function setChatProxyCors(request: IncomingMessage, response: ServerResponse): void {
+  const origin = request.headers.origin;
+
+  if (origin === "file://" || origin === "null" || origin === "http://localhost:5173") {
+    response.setHeader("access-control-allow-origin", origin);
+  }
+
+  response.setHeader("access-control-allow-methods", "POST, OPTIONS");
+  response.setHeader("access-control-allow-headers", "content-type, x-portmax-blade-auth, x-portmax-tenant-id");
+  response.setHeader("access-control-expose-headers", "x-vercel-ai-ui-message-stream");
+  response.setHeader("vary", "Origin");
+}
+
+async function forwardChatRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  setChatProxyCors(request, response);
+
+  if (request.method === "OPTIONS") {
+    response.writeHead(204).end();
+    return;
+  }
+
+  if (request.method !== "POST" || !request.url?.startsWith("/chat/")) {
+    response.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "Not found." }));
+    return;
+  }
+
+  try {
+    const upstreamHeaders = new Headers();
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (value && !["connection", "content-length", "host"].includes(name.toLowerCase())) {
+        upstreamHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+      }
+    }
+
+    const upstreamResponse = await fetch(new URL(request.url, serviceEndpoints.mastraServerUrl), {
+      method: "POST",
+      headers: upstreamHeaders,
+      body: Readable.toWeb(request) as never,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    for (const [name, value] of upstreamResponse.headers) {
+      if (!['connection', 'keep-alive', 'transfer-encoding'].includes(name.toLowerCase())) {
+        response.setHeader(name, value);
+      }
+    }
+    setChatProxyCors(request, response);
+    response.writeHead(upstreamResponse.status);
+
+    if (upstreamResponse.body) {
+      Readable.fromWeb(upstreamResponse.body as never).pipe(response);
+    } else {
+      response.end();
+    }
+  } catch {
+    response.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ error: "Chat service is unavailable." }));
+  }
+}
+
+async function startChatProxy(): Promise<string> {
+  chatProxyServer = createServer((request, response) => {
+    void forwardChatRequest(request, response);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    chatProxyServer?.once("error", reject);
+    chatProxyServer?.listen(0, "127.0.0.1", () => {
+      chatProxyServer?.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = chatProxyServer.address();
+  if (!address || typeof address === "string") throw new Error("Unable to determine the local chat proxy port.");
+  return `http://127.0.0.1:${address.port}`;
 }
 
 function isLoginInput(value: unknown): value is LoginInput {
@@ -354,6 +435,11 @@ function createWindow(): void {
     return serviceEndpoints;
   });
 
+  ipcMain.handle("server:get-chat-proxy-url", (event) => {
+    if (event.sender !== mainWindow.webContents) return null;
+    return chatProxyUrl;
+  });
+
   ipcMain.handle("auth:logout", async (event) => {
     if (event.sender !== mainWindow.webContents) return;
     await clearSavedSession();
@@ -364,6 +450,7 @@ function createWindow(): void {
     ipcMain.removeHandler("auth:restore-session");
     ipcMain.removeHandler("auth:get-mcp-session-input");
     ipcMain.removeHandler("server:get-endpoints");
+    ipcMain.removeHandler("server:get-chat-proxy-url");
     ipcMain.removeHandler("auth:logout");
   });
 
@@ -379,6 +466,12 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   serviceEndpoints = await loadServiceEndpoints();
 
+  try {
+    chatProxyUrl = await startChatProxy();
+  } catch (error) {
+    console.error("Unable to start the local chat proxy.", error);
+  }
+
   app.on("browser-window-created", (_, window) => optimizer.watchWindowShortcuts(window));
   createWindow();
 
@@ -389,4 +482,8 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  chatProxyServer?.close();
 });

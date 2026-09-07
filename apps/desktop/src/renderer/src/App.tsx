@@ -214,6 +214,7 @@ function ConversationPanel({
   const [prompt, setPrompt] = useState("");
   const [mcpSessionInput, setMcpSessionInput] = useState<{ bladeAuth: string; tenantId: string } | null>(null);
   const [serviceEndpoints, setServiceEndpoints] = useState<ServiceEndpoints | null>(null);
+  const [chatProxyUrl, setChatProxyUrl] = useState<string | null>(null);
   const [isLoadingMcpSessionInput, setIsLoadingMcpSessionInput] = useState(true);
   const initialMessages = useRef(conversation.messages);
   const skipInitialPersist = useRef(true);
@@ -226,15 +227,18 @@ function ConversationPanel({
     void Promise.all([
       window.api.auth.getMcpSessionInput(),
       window.api.server.getEndpoints(),
-    ]).then(([sessionInput, endpoints]) => {
+      window.api.server.getChatProxyUrl(),
+    ]).then(([sessionInput, endpoints, proxyUrl]) => {
       if (!isCurrent) return;
       setMcpSessionInput(sessionInput);
       setServiceEndpoints(endpoints);
+      setChatProxyUrl(proxyUrl);
       setIsLoadingMcpSessionInput(false);
     }).catch(() => {
       if (!isCurrent) return;
       setMcpSessionInput(null);
       setServiceEndpoints(null);
+      setChatProxyUrl(null);
       setIsLoadingMcpSessionInput(false);
     });
 
@@ -246,7 +250,7 @@ function ConversationPanel({
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
-        api: `${serviceEndpoints?.mastraServerUrl ?? "http://localhost:4111"}/chat/portmax-assistant`,
+        api: `${chatProxyUrl ?? "http://127.0.0.1:0"}/chat/portmax-assistant`,
         headers: mcpSessionInput
           ? {
               "x-portmax-blade-auth": mcpSessionInput.bladeAuth,
@@ -254,14 +258,14 @@ function ConversationPanel({
             }
           : undefined,
       }),
-    [mcpSessionInput, serviceEndpoints],
+    [chatProxyUrl, mcpSessionInput],
   );
   const { messages, setMessages, sendMessage, status, error } = useChat({
     id: conversation.id,
     transport,
   });
   const isSending = status === "submitted" || status === "streaming";
-  const canSend = Boolean(mcpSessionInput && serviceEndpoints) && !isSending;
+  const canSend = Boolean(mcpSessionInput && serviceEndpoints && chatProxyUrl) && !isSending;
   const scrollToBottom = useCallback((): void => {
     const container = scrollContainerRef.current;
     if (container) container.scrollTop = container.scrollHeight;

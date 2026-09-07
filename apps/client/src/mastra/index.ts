@@ -17,6 +17,7 @@ export const mastra = new Mastra({
       origin: ["http://localhost:5173", "null", "file://"],
       allowMethods: ["*"],
       allowHeaders: ["*"],
+      exposeHeaders: ["Content-Length", "X-Requested-With", "x-vercel-ai-ui-message-stream"],
     },
     middleware: [
       {

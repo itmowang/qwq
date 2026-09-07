@@ -17,6 +17,7 @@ const api: DesktopApi = {
   },
   server: {
     getEndpoints: (): Promise<ServiceEndpoints | null> => ipcRenderer.invoke("server:get-endpoints"),
+    getChatProxyUrl: (): Promise<string | null> => ipcRenderer.invoke("server:get-chat-proxy-url"),
   },
 };
 

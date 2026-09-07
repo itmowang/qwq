@@ -45,5 +45,6 @@ export type DesktopApi = {
   };
   server: {
     getEndpoints: () => Promise<ServiceEndpoints | null>;
+    getChatProxyUrl: () => Promise<string | null>;
   };
 };
