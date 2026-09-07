@@ -29,6 +29,10 @@ const outboundSchedulePageSchema = {
   selectType: z.number().int().default(0).describe("Blade 出库计划查询的选择类型。"),
 };
 
+const dictionarySchema = {
+  code: z.string().trim().min(1).describe("Portmax 字典编码。"),
+};
+
 function getOutboundScheduleCredentials(sessionCredentials: McpSessionCredentials | undefined): McpSessionCredentials {
   const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH?.trim();
 
@@ -43,6 +47,65 @@ function getOutboundScheduleCredentials(sessionCredentials: McpSessionCredential
 
 export function createMcpTransport(options: McpTransportOptions = {}) {
   const server = new McpServer({ name: "portmax_api", version: "0.1.0" });
+  const getDictionaryCredentials = (): McpSessionCredentials => {
+    const sessionCredentials = options.getSessionCredentials?.();
+    const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_DICTIONARY_BLADE_AUTH?.trim();
+
+    if (!bladeAuth) {
+      throw new Error(
+        "发起字典查询前必须在 MCP 请求中提供 X-Portmax-Blade-Auth，或配置 PORTMAX_DICTIONARY_BLADE_AUTH。",
+      );
+    }
+
+    return { bladeAuth, tenantId: sessionCredentials?.tenantId };
+  };
+
+  server.registerTool(
+    "search_dict",
+    {
+      title: "查询 Portmax 字典",
+      description: "根据唯一的字典编码 code 查询已配置 Portmax 上游服务的字典数据；请求路径和方法均已固定。",
+      inputSchema: dictionarySchema,
+    },
+    async ({ code }) => {
+      try {
+        const credentials = getDictionaryCredentials();
+        const query = new URLSearchParams({ code });
+        const upstreamResponse = await forwardUpstream({
+          path: `/blade-system/dict/dictionary?${query.toString()}`,
+          method: "GET",
+          headers: {
+            accept: "application/json, text/plain, */*",
+            "blade-auth": credentials.bladeAuth,
+            "blade-requested-with": "BladeHttpRequest",
+            ...(credentials.tenantId ? { "tenant-id": credentials.tenantId } : {}),
+          },
+          // 字典接口使用每个 MCP session 绑定的 Blade-Auth，不使用通用 Authorization 请求头。
+          authorization: "",
+        });
+        const text = await upstreamResponse.text();
+        const summary = JSON.stringify(
+          {
+            status: upstreamResponse.status,
+            contentType: upstreamResponse.headers.get("content-type"),
+            body: text,
+          },
+          null,
+          2,
+        );
+
+        return {
+          content: [{ type: "text", text: summary }],
+          isError: !upstreamResponse.ok,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : "字典查询失败。" }],
+          isError: true,
+        };
+      }
+    },
+  );
 
   server.registerTool(
     "request_upstream",
