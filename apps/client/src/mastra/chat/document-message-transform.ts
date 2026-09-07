@@ -1,10 +1,12 @@
 import mammoth from "mammoth";
+import { PDFParse } from "pdf-parse";
 import * as XLSX from "xlsx";
 
 const maxDocumentBytes = 4 * 1024 * 1024;
 const maxDocumentsPerRequest = 3;
 const maxWorkbookSheets = 3;
 const maxWorkbookRowsPerSheet = 100;
+const maxPdfPages = 30;
 const maxTextCharactersPerDocument = 12_000;
 const maxTextCharactersPerRequest = 24_000;
 
@@ -13,6 +15,7 @@ const spreadsheetMediaTypes = new Set([
   "application/vnd.ms-excel",
 ]);
 const wordDocumentMediaType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const pdfMediaType = "application/pdf";
 
 type ChatRequest = Record<string, unknown> & { messages: unknown[] };
 type FilePart = {
@@ -79,6 +82,10 @@ function hasOleSignature(bytes: Buffer): boolean {
   return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
 }
 
+function hasPdfSignature(bytes: Buffer): boolean {
+  return bytes.length >= 5 && bytes.subarray(0, 5).equals(Buffer.from("%PDF-"));
+}
+
 function truncateText(value: string, limit: number): string {
   const normalized = value.replace(/\u0000/g, "").trim();
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit)}\n[内容已截断]`;
@@ -111,6 +118,35 @@ function extractSpreadsheetText(bytes: Buffer, filename: string): string {
   }
 }
 
+async function extractPdfText(bytes: Buffer, filename: string): Promise<string> {
+  if (!hasPdfSignature(bytes)) {
+    throw new DocumentAttachmentError(`附件 ${filename} 不是有效的 PDF 文件。`, 422);
+  }
+
+  const parser = new PDFParse({ data: bytes, stopAtErrors: true });
+  try {
+    const info = await parser.getInfo();
+    if (info.total > maxPdfPages) {
+      throw new DocumentAttachmentError(`附件 ${filename} 超过 ${maxPdfPages} 页限制。`, 413);
+    }
+
+    const result = await parser.getText({
+      first: maxPdfPages,
+      pageJoiner: "\n\n--- 第 page_number 页 / 共 total_number 页 ---\n",
+    });
+    const text = truncateText(result.text, maxTextCharactersPerDocument);
+    if (!text) {
+      throw new DocumentAttachmentError(`附件 ${filename} 没有可提取的文本。扫描件请先进行 OCR 后重试。`, 422);
+    }
+    return text;
+  } catch (error) {
+    if (error instanceof DocumentAttachmentError) throw error;
+    throw new DocumentAttachmentError(`无法解析 PDF 附件 ${filename}。请确认文件未损坏、未加密且包含可选择文本。`, 422);
+  } finally {
+    await parser.destroy().catch(() => undefined);
+  }
+}
+
 async function extractWordText(bytes: Buffer, filename: string): Promise<string> {
   if (!hasZipSignature(bytes)) {
     throw new DocumentAttachmentError(`附件 ${filename} 不是有效的 DOCX 文件。`, 422);
@@ -134,9 +170,10 @@ async function extractDocumentText(part: FilePart): Promise<string> {
 
   if (spreadsheetMediaTypes.has(mediaType)) return extractSpreadsheetText(bytes, filename);
   if (mediaType === wordDocumentMediaType) return extractWordText(bytes, filename);
+  if (mediaType === pdfMediaType) return extractPdfText(bytes, filename);
 
   throw new DocumentAttachmentError(
-    `附件 ${filename} 的类型 ${part.mediaType} 暂不支持解析。请上传 XLS、XLSX 或 DOCX 文件。`,
+    `附件 ${filename} 的类型 ${part.mediaType} 暂不支持解析。请上传 PDF、XLS、XLSX 或 DOCX 文件。`,
     415,
   );
 }

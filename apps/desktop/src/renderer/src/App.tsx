@@ -49,6 +49,7 @@ const supportedAttachmentTypes = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".pdf": "application/pdf",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ".xls": "application/vnd.ms-excel",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -520,7 +521,7 @@ function ConversationPanel({
             className="composer-attachment-button"
             disabled={!canSend}
             onClick={() => attachmentInputRef.current?.click()}
-            title="添加图片、Excel 或 Word（DOCX）附件"
+            title="添加图片、PDF、Excel 或 Word（DOCX）附件"
             type="button"
           >
             <span aria-hidden="true">⌕</span>
@@ -576,7 +577,7 @@ function ConversationPanel({
             ? "正在验证登录凭据…"
             : !mcpSessionInput
               ? "登录凭据或工作区服务不可用，请重新登录后重试。"
-              : `可添加图片、Excel、Word（DOCX）（最多 ${maxAttachmentsPerMessage} 个，总计 ${formatFileSize(maxAttachmentTotalBytes)}）· Enter 发送 · Shift + Enter 换行`}
+              : `可添加图片、PDF、Excel、Word（DOCX）（最多 ${maxAttachmentsPerMessage} 个，总计 ${formatFileSize(maxAttachmentTotalBytes)}）· Enter 发送 · Shift + Enter 换行`}
         </p>
       </div>
     </>
