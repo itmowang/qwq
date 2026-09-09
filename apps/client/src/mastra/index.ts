@@ -5,6 +5,8 @@ import { portmaxAssistant } from "./agents/portmax-assistant.js";
 import { portmaxChatRoute } from "./chat/portmax-chat-route.js";
 import { portmaxTools } from "./mcp/client.js";
 import { getCurrentTime } from "./tools/current-time.js";
+import { mastraSmokeWorkflow } from "./workflows/mastra-smoke-workflow.js";
+import { portmaxCreateWorkflow, portmaxTextMetricsWorkflow } from "./workflows/portmax/index.js";
 
 const maxCredentialLength = 4096;
 const maxTenantIdLength = 128;
@@ -46,6 +48,11 @@ async function addPortmaxRequestContext(c: any, next: () => Promise<void>, requi
 
 export const mastra = new Mastra({
   agents: { portmaxAssistant },
+  workflows: {
+    "mastra-smoke-workflow": mastraSmokeWorkflow,
+    "portmax-create-workflow": portmaxCreateWorkflow,
+    "portmax-text-metrics-workflow": portmaxTextMetricsWorkflow,
+  },
   mcpServers: { "local-tools": localToolsMcpServer },
   editor: new MastraEditor({
     source: "code",
@@ -62,6 +69,11 @@ export const mastra = new Mastra({
     middleware: [
       {
         path: "/chat/*",
+        handler: (c, next) => addPortmaxRequestContext(c, next, true),
+      },
+      {
+        // Workflow runs use the current request context to reach portmax_api. Credentials never enter workflow input/output.
+        path: "/workflows/*",
         handler: (c, next) => addPortmaxRequestContext(c, next, true),
       },
       {

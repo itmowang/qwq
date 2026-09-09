@@ -1510,3 +1510,77 @@ a,
 .tool-call__body .tool-call__result + .tool-call__error {
   border-top: 1px solid #dce8f4;
 }
+.warehouse-options {
+  padding: 0.6rem 0.65rem 0.7rem;
+}
+
+.warehouse-options__summary,
+.warehouse-options__empty,
+.warehouse-options__truncation {
+  margin: 0;
+  color: #466078;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.warehouse-options__list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.warehouse-options__option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  border: 1px solid #b8cfe5;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f5a8d;
+  cursor: pointer;
+  padding: 0.48rem 0.55rem;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.warehouse-options__option:hover:not(:disabled) {
+  border-color: #6f9fd0;
+  background: #edf6ff;
+}
+
+.warehouse-options__option:focus-visible {
+  outline: 2px solid rgb(31 95 168 / 0.35);
+  outline-offset: 2px;
+}
+
+.warehouse-options__option:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.warehouse-options__option--selected {
+  border-color: #85c5a0;
+  background: #f1fbf5;
+  color: #236842;
+}
+
+.warehouse-options__option-meta {
+  flex: none;
+  color: #18794e;
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.warehouse-options__empty {
+  margin-top: 0.45rem;
+}
+
+.warehouse-options__truncation {
+  margin-top: 0.55rem;
+  color: #9a5a12;
+}

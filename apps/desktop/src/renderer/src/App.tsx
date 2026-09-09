@@ -39,7 +39,25 @@ type MessagePart = UIMessage["parts"][number];
 type FileMessagePart = Extract<MessagePart, { type: "file" }>;
 type PendingAttachment = FileMessagePart & { size: number };
 type PartRecord = Record<string, unknown>;
+type WarehouseOption = {
+  name: string;
+  id?: string;
+  warehouseId?: string;
+};
+type WarehouseCandidatesOutput = {
+  warehouseName: string;
+  total: number;
+  truncated: boolean;
+  warehouseOptions: WarehouseOption[];
+};
+type WarehouseSelection = {
+  sourceMessageId: string;
+  warehouse: WarehouseOption;
+};
 
+const warehouseWorkflowName = "portmax-create-workflow";
+const warehouseSelectionPrefix = "PORTMAX_WAREHOUSE_SELECTION_V1 ";
+const maxWarehouseCandidates = 20;
 const maxAttachmentsPerMessage = 3;
 const maxAttachmentSizeBytes = 4 * 1024 * 1024;
 const maxAttachmentTotalBytes = 8 * 1024 * 1024;
@@ -84,6 +102,83 @@ function partRecord(part: MessagePart): PartRecord {
   return part as unknown as PartRecord;
 }
 
+function isRecord(value: unknown): value is PartRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseJsonObject(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function optionalNonBlankString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function parseWarehouseOption(value: unknown): WarehouseOption | null {
+  if (!isRecord(value)) return null;
+  const name = optionalNonBlankString(value.name);
+  if (!name) return null;
+
+  const id = optionalNonBlankString(value.id);
+  const warehouseId = optionalNonBlankString(value.warehouseId);
+  return { name, ...(id ? { id } : {}), ...(warehouseId ? { warehouseId } : {}) };
+}
+
+function parseWarehouseCandidatesOutput(value: unknown): WarehouseCandidatesOutput | null {
+  const record = parseJsonObject(value);
+  if (!isRecord(record)) return null;
+
+  const total = record.total;
+  if (typeof record.warehouseName !== "string"
+    || typeof total !== "number"
+    || !Number.isSafeInteger(total)
+    || total < 0
+    || typeof record.truncated !== "boolean"
+    || !Array.isArray(record.warehouseOptions)
+    || record.warehouseOptions.length > maxWarehouseCandidates) {
+    return null;
+  }
+
+  const warehouseOptions = record.warehouseOptions.map(parseWarehouseOption);
+  if (warehouseOptions.some((option) => option === null)) return null;
+
+  return {
+    warehouseName: record.warehouseName,
+    total,
+    truncated: record.truncated,
+    warehouseOptions: warehouseOptions as WarehouseOption[],
+  };
+}
+
+function warehouseOptionKey(sourceMessageId: string, warehouse: WarehouseOption): string {
+  return `${sourceMessageId}:${warehouse.id ?? ""}:${warehouse.warehouseId ?? ""}:${warehouse.name}`;
+}
+
+function parseWarehouseSelection(text: string): WarehouseSelection | null {
+  if (!text.startsWith(warehouseSelectionPrefix)) return null;
+
+  const value = parseJsonObject(text.slice(warehouseSelectionPrefix.length));
+  if (!isRecord(value) || typeof value.sourceMessageId !== "string" || !value.sourceMessageId) return null;
+  const warehouse = parseWarehouseOption(value.warehouse);
+  return warehouse ? { sourceMessageId: value.sourceMessageId, warehouse } : null;
+}
+
+function selectedWarehouseOptionKeys(messages: UIMessage[]): Set<string> {
+  return new Set(
+    messages
+      .filter((message) => message.role === "user")
+      .map((message) => parseWarehouseSelection(messageText(message)))
+      .filter((selection): selection is WarehouseSelection => selection !== null)
+      .map((selection) => warehouseOptionKey(selection.sourceMessageId, selection.warehouse)),
+  );
+}
+
 function displayPartValue(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === undefined || value === null) return "";
@@ -95,10 +190,21 @@ function displayPartValue(value: unknown): string {
   }
 }
 
+function toolOutput(record: PartRecord): unknown {
+  return record.output ?? record.result ?? record.toolResult ?? record.data;
+}
+
+function isWarehouseWorkflowResult(part: MessagePart): boolean {
+  const record = partRecord(part);
+  return record.state === "output-available"
+    && (record.toolName === warehouseWorkflowName || part.type === `tool-${warehouseWorkflowName}`);
+}
+
 function toolLabel(part: MessagePart): string {
   const record = partRecord(part);
   const explicitName = record.toolName;
 
+  if (explicitName === warehouseWorkflowName || part.type === `tool-${warehouseWorkflowName}`) return "仓库查询";
   if (typeof explicitName === "string" && explicitName) return explicitName;
   return part.type === "dynamic-tool" ? "工具调用" : part.type.replace(/^tool-/, "");
 }
@@ -126,14 +232,73 @@ function isToolCallPart(part: MessagePart): boolean {
   return part.type === "dynamic-tool" || part.type.startsWith("tool-");
 }
 
-function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
+function WarehouseCandidatesPart({
+  candidates,
+  disabled,
+  onSelect,
+  selectedOptionKeys,
+  sourceMessageId,
+}: {
+  candidates: WarehouseCandidatesOutput;
+  disabled: boolean;
+  onSelect: (sourceMessageId: string, warehouse: WarehouseOption) => void;
+  selectedOptionKeys: ReadonlySet<string>;
+  sourceMessageId: string;
+}): React.JSX.Element {
+  return (
+    <div className="warehouse-options">
+      <p className="warehouse-options__summary">共匹配到 {candidates.total} 个仓库，请选择一个继续。</p>
+      {candidates.warehouseOptions.length > 0 ? (
+        <div className="warehouse-options__list">
+          {candidates.warehouseOptions.map((warehouse) => {
+            const selectionKey = warehouseOptionKey(sourceMessageId, warehouse);
+            const selected = selectedOptionKeys.has(selectionKey);
+            return (
+              <button
+                aria-pressed={selected}
+                className={`warehouse-options__option ${selected ? "warehouse-options__option--selected" : ""}`}
+                disabled={disabled || selected}
+                key={selectionKey}
+                onClick={() => onSelect(sourceMessageId, warehouse)}
+                type="button"
+              >
+                <span>{warehouse.name}</span>
+                {selected ? <span className="warehouse-options__option-meta">已选择</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : <p className="warehouse-options__empty">没有匹配的仓库。</p>}
+      {candidates.truncated ? <p className="warehouse-options__truncation">仅显示部分候选仓库，请缩小名称范围后重新查询。</p> : null}
+    </div>
+  );
+}
+
+function ToolCallPart({
+  disabledWarehouseSelection,
+  onWarehouseSelect,
+  part,
+  selectedWarehouseOptionKeys: selectedOptionKeys,
+  sourceMessageId,
+}: {
+  disabledWarehouseSelection: boolean;
+  onWarehouseSelect: (sourceMessageId: string, warehouse: WarehouseOption) => void;
+  part: MessagePart;
+  selectedWarehouseOptionKeys: ReadonlySet<string>;
+  sourceMessageId: string;
+}): React.JSX.Element {
   const [isExpanded, setIsExpanded] = useState(true);
   const record = partRecord(part);
   const input = displayPartValue(record.input ?? record.args);
-  const output = displayPartValue(record.output ?? record.result ?? record.toolResult ?? record.data);
+  const outputValue = toolOutput(record);
+  const output = displayPartValue(outputValue);
   const error = displayPartValue(record.errorText ?? record.error);
   const isComplete = record.state === "output-available";
-  const result = output || (isComplete ? "工具调用已完成，结果已用于生成下方回答。" : "正在等待工具返回结果…");
+  const isWarehouseWorkflow = isWarehouseWorkflowResult(part);
+  const warehouseCandidates = isWarehouseWorkflow ? parseWarehouseCandidatesOutput(outputValue) : null;
+  const result = isWarehouseWorkflow && !warehouseCandidates
+    ? "仓库查询结果无法安全显示，请重新查询。"
+    : output || (isComplete ? "工具调用已完成，结果已用于生成下方回答。" : "正在等待工具返回结果…");
 
   return (
     <section className={`tool-call tool-call--${String(record.state ?? "pending")}`}>
@@ -160,7 +325,15 @@ function ToolCallPart({ part }: { part: MessagePart }): React.JSX.Element {
           ) : null}
           <div className="tool-call__result">
             <p>工具反馈</p>
-            <pre>{result}</pre>
+            {warehouseCandidates ? (
+              <WarehouseCandidatesPart
+                candidates={warehouseCandidates}
+                disabled={disabledWarehouseSelection}
+                onSelect={onWarehouseSelect}
+                selectedOptionKeys={selectedOptionKeys}
+                sourceMessageId={sourceMessageId}
+              />
+            ) : <pre>{result}</pre>}
           </div>
           {error ? <p className="tool-call__error">{error}</p> : null}
         </div>
@@ -191,11 +364,29 @@ function FileMessagePartView({ part }: { part: FileMessagePart }): React.JSX.Ele
   );
 }
 
-function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming: boolean }): React.JSX.Element | null {
+function MessagePartView({
+  disabledWarehouseSelection,
+  isStreaming,
+  messageRole,
+  onWarehouseSelect,
+  part,
+  selectedWarehouseOptionKeys,
+  sourceMessageId,
+}: {
+  disabledWarehouseSelection: boolean;
+  isStreaming: boolean;
+  messageRole: UIMessage["role"];
+  onWarehouseSelect: (sourceMessageId: string, warehouse: WarehouseOption) => void;
+  part: MessagePart;
+  selectedWarehouseOptionKeys: ReadonlySet<string>;
+  sourceMessageId: string;
+}): React.JSX.Element | null {
   if (part.type === "text") {
+    const selection = messageRole === "user" ? parseWarehouseSelection(part.text) : null;
+    const text = selection ? `已选择仓库：${selection.warehouse.name}` : part.text;
     return (
       <div className={isStreaming ? "message-markdown message-markdown--streaming" : "message-markdown"}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{part.text}</ReactMarkdown>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
         {isStreaming ? <span aria-hidden="true" className="streaming-cursor" /> : null}
       </div>
     );
@@ -216,7 +407,15 @@ function MessagePartView({ part, isStreaming }: { part: MessagePart; isStreaming
   }
 
   if (isToolCallPart(part)) {
-    return <ToolCallPart part={part} />;
+    return (
+      <ToolCallPart
+        disabledWarehouseSelection={disabledWarehouseSelection}
+        onWarehouseSelect={onWarehouseSelect}
+        part={part}
+        selectedWarehouseOptionKeys={selectedWarehouseOptionKeys}
+        sourceMessageId={sourceMessageId}
+      />
+    );
   }
 
   return null;
@@ -293,6 +492,7 @@ function ConversationPanel({
   const skipInitialPersist = useRef(true);
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
+  const pendingWarehouseSelectionKeysRef = useRef(new Set<string>());
 
   useEffect(() => {
     let isCurrent = true;
@@ -339,6 +539,7 @@ function ConversationPanel({
   });
   const isSending = status === "submitted" || status === "streaming";
   const canSend = Boolean(mcpSessionInput && serviceEndpoints && chatProxyUrl) && !isSending;
+  const selectedWarehouseKeys = useMemo(() => selectedWarehouseOptionKeys(messages), [messages]);
   const scrollToBottom = useCallback((): void => {
     const container = scrollContainerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
@@ -431,6 +632,17 @@ function ConversationPanel({
     setAttachmentError(null);
   }
 
+  function handleWarehouseSelect(sourceMessageId: string, warehouse: WarehouseOption): void {
+    const selectionKey = warehouseOptionKey(sourceMessageId, warehouse);
+    if (!canSend || selectedWarehouseKeys.has(selectionKey) || pendingWarehouseSelectionKeysRef.current.has(selectionKey)) return;
+
+    pendingWarehouseSelectionKeysRef.current.add(selectionKey);
+    shouldAutoScrollRef.current = true;
+    const selection: WarehouseSelection = { sourceMessageId, warehouse };
+    void sendMessage({ text: `${warehouseSelectionPrefix}${JSON.stringify(selection)}` })
+      .catch(() => pendingWarehouseSelectionKeysRef.current.delete(selectionKey));
+  }
+
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     const text = prompt.trim();
@@ -489,7 +701,16 @@ function ConversationPanel({
                     <p className="message-author">{isUser ? "你" : "Portmax Assistant"}</p>
                     <div className="message-bubble">
                       {message.parts.map((part, index) => (
-                        <MessagePartView isStreaming={isStreamingMessage} key={`${part.type}-${index}`} part={part} />
+                        <MessagePartView
+                          disabledWarehouseSelection={!canSend}
+                          isStreaming={isStreamingMessage}
+                          key={`${part.type}-${index}`}
+                          messageRole={message.role}
+                          onWarehouseSelect={handleWarehouseSelect}
+                          part={part}
+                          selectedWarehouseOptionKeys={selectedWarehouseKeys}
+                          sourceMessageId={message.id}
+                        />
                       ))}
                     </div>
                   </div>
