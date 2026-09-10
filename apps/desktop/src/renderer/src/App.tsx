@@ -54,6 +54,17 @@ type WarehouseSelection = {
   sourceMessageId: string;
   warehouse: WarehouseOption;
 };
+type SuspendResumeDemoOption = {
+  value: string;
+  label: string;
+};
+type SuspendResumeDemoState =
+  | { status: "idle" }
+  | { status: "starting" }
+  | { status: "suspended"; runId: string; title: string; prompt: string; stepId: string; options: SuspendResumeDemoOption[]; selectedWarehouseName?: string }
+  | { status: "resuming"; runId: string; title: string; optionLabel: string; selectedWarehouseName?: string }
+  | { status: "completed"; title: string; selectedWarehouseName?: string; decision: "approve" | "reject" }
+  | { status: "error"; message: string };
 
 const warehouseWorkflowName = "portmax-create-workflow";
 const warehouseSelectionPrefix = "PORTMAX_WAREHOUSE_SELECTION_V1 ";
@@ -118,6 +129,18 @@ function parseJsonObject(value: unknown): unknown {
 
 function optionalNonBlankString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function parseSuspendResumeDemoOptions(value: unknown): SuspendResumeDemoOption[] | null {
+  if (!Array.isArray(value) || value.length < 2 || value.length > 5) return null;
+
+  const options = value.map((option) => {
+    if (!isRecord(option)) return null;
+    const optionValue = optionalNonBlankString(option.value);
+    const label = optionalNonBlankString(option.label);
+    return optionValue && label ? { value: optionValue, label } : null;
+  });
+  return options.some((option) => option === null) ? null : options as SuspendResumeDemoOption[];
 }
 
 function parseWarehouseOption(value: unknown): WarehouseOption | null {
@@ -487,6 +510,7 @@ function ConversationPanel({
   const [serviceEndpoints, setServiceEndpoints] = useState<ServiceEndpoints | null>(null);
   const [chatProxyUrl, setChatProxyUrl] = useState<string | null>(null);
   const [isLoadingMcpSessionInput, setIsLoadingMcpSessionInput] = useState(true);
+  const [suspendResumeDemo, setSuspendResumeDemo] = useState<SuspendResumeDemoState>({ status: "idle" });
   const initialMessages = useRef(conversation.messages);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const skipInitialPersist = useRef(true);
@@ -643,6 +667,84 @@ function ConversationPanel({
       .catch(() => pendingWarehouseSelectionKeysRef.current.delete(selectionKey));
   }
 
+  async function postSuspendResumeDemo(path: "start" | "resume", body: Record<string, string>): Promise<PartRecord> {
+    if (!chatProxyUrl || !mcpSessionInput) throw new Error("登录会话或 Desktop 本地代理不可用。");
+
+    const response = await fetch(`${chatProxyUrl}/desktop-demo/suspend-resume/${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-portmax-blade-auth": mcpSessionInput.bladeAuth,
+        "x-portmax-tenant-id": mcpSessionInput.tenantId,
+      },
+      body: JSON.stringify(body),
+    });
+    const payload: unknown = await response.json().catch(() => null);
+    const errorMessage = isRecord(payload) ? optionalNonBlankString(payload.error) : undefined;
+    if (!response.ok) throw new Error(errorMessage ?? "Workflow 示例请求失败。");
+    if (!isRecord(payload)) throw new Error("Workflow 示例返回了无法识别的数据。");
+    return payload;
+  }
+
+  async function startSuspendResumeDemo(): Promise<void> {
+    if (!canSend) return;
+    setSuspendResumeDemo({ status: "starting" });
+
+    try {
+      const payload = await postSuspendResumeDemo("start", { title: "发布示例配置" });
+      const runId = optionalNonBlankString(payload.runId);
+      const title = optionalNonBlankString(payload.title);
+      const prompt = optionalNonBlankString(payload.prompt);
+      const stepId = optionalNonBlankString(payload.stepId);
+      const options = parseSuspendResumeDemoOptions(payload.options);
+      if (payload.status !== "suspended" || !runId || !title || !prompt || !stepId || !options) {
+        throw new Error("Workflow 没有返回可恢复的仓库选择状态。");
+      }
+      setSuspendResumeDemo({ status: "suspended", runId, title, prompt, stepId, options });
+    } catch (error) {
+      setSuspendResumeDemo({ status: "error", message: error instanceof Error ? error.message : "无法启动 Workflow 示例。" });
+    }
+  }
+
+  async function resumeSuspendResumeDemo(option: SuspendResumeDemoOption): Promise<void> {
+    if (suspendResumeDemo.status !== "suspended") return;
+
+    const { runId, title, stepId, selectedWarehouseName } = suspendResumeDemo;
+    setSuspendResumeDemo({ status: "resuming", runId, title, optionLabel: option.label, selectedWarehouseName });
+    try {
+      const payload = await postSuspendResumeDemo("resume", { runId, stepId, optionValue: option.value });
+      if (payload.status === "suspended") {
+        const nextStepId = optionalNonBlankString(payload.stepId);
+        const prompt = optionalNonBlankString(payload.prompt);
+        const options = parseSuspendResumeDemoOptions(payload.options);
+        const selectedWarehouse = isRecord(payload.selectedWarehouse)
+          ? optionalNonBlankString(payload.selectedWarehouse.name)
+          : undefined;
+        if (!nextStepId || !prompt || !options || !selectedWarehouse) {
+          throw new Error("Workflow 没有返回下一步确认选项。");
+        }
+        setSuspendResumeDemo({
+          status: "suspended",
+          runId,
+          title,
+          stepId: nextStepId,
+          prompt,
+          options,
+          selectedWarehouseName: selectedWarehouse,
+        });
+        return;
+      }
+
+      const decision = payload.decision;
+      if (payload.status !== "completed" || (decision !== "approve" && decision !== "reject")) {
+        throw new Error("Workflow 恢复结果无法验证。");
+      }
+      setSuspendResumeDemo({ status: "completed", title, selectedWarehouseName, decision });
+    } catch (error) {
+      setSuspendResumeDemo({ status: "error", message: error instanceof Error ? error.message : "无法恢复 Workflow 示例。" });
+    }
+  }
+
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     const text = prompt.trim();
@@ -670,13 +772,48 @@ function ConversationPanel({
   return (
     <>
       <section className="conversation-scroll" aria-live="polite" onScroll={handleConversationScroll} ref={scrollContainerRef}>
+        {suspendResumeDemo.status !== "idle" ? (
+          <section className="warehouse-options" aria-label="暂停与恢复 Workflow 示例">
+            <p className="warehouse-options__summary"><strong>Suspend / Resume 示例</strong></p>
+            {suspendResumeDemo.status === "starting" ? <p className="warehouse-options__summary">正在启动 workflow，并创建暂停快照…</p> : null}
+            {suspendResumeDemo.status === "suspended" ? (
+              <>
+                <p className="warehouse-options__summary">{suspendResumeDemo.prompt}</p>
+                {suspendResumeDemo.selectedWarehouseName ? <p className="warehouse-options__summary">当前仓库：{suspendResumeDemo.selectedWarehouseName}</p> : null}
+                <div className="warehouse-options__list">
+                  {suspendResumeDemo.options.map((option) => (
+                    <button
+                      className="warehouse-options__option"
+                      disabled={!canSend}
+                      key={option.value}
+                      onClick={() => void resumeSuspendResumeDemo(option)}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : null}
+            {suspendResumeDemo.status === "resuming" ? <p className="warehouse-options__summary">正在按“{suspendResumeDemo.optionLabel}”恢复 workflow…</p> : null}
+            {suspendResumeDemo.status === "completed" ? (
+              <p className="warehouse-options__summary">第 3 步（共 3 步）已完成：{suspendResumeDemo.decision === "approve" ? "已确认" : "已取消"}{suspendResumeDemo.selectedWarehouseName ? `“${suspendResumeDemo.selectedWarehouseName}”` : ""}。</p>
+            ) : null}
+            {suspendResumeDemo.status === "error" ? (
+              <>
+                <p className="warehouse-options__truncation">{suspendResumeDemo.message}</p>
+                <div className="warehouse-options__list"><button className="warehouse-options__option" disabled={!canSend} onClick={() => void startSuspendResumeDemo()} type="button">重新运行示例</button></div>
+              </>
+            ) : null}
+          </section>
+        ) : null}
         {messages.length === 0 ? (
           <div className="conversation-empty">
             <div className="conversation-empty__mark" aria-hidden="true">✦</div>
             <h2>从这里开始一段新对话</h2>
             <p>询问 Portmax 助手业务、数据或当前时间相关的问题。</p>
             <div className="suggestion-list">
-              {["现在上海几点？", "帮我梳理今天的工作", "我可以做什么？"].map((suggestion) => (
+              {['现在上海几点？', '帮我梳理今天的工作', '我可以做什么？'].map((suggestion) => (
                 <button
                   className="suggestion-chip"
                   key={suggestion}
@@ -686,6 +823,14 @@ function ConversationPanel({
                   {suggestion}
                 </button>
               ))}
+              <button
+                className="suggestion-chip"
+                disabled={!canSend}
+                onClick={() => void startSuspendResumeDemo()}
+                type="button"
+              >
+                运行 Suspend / Resume 示例
+              </button>
             </div>
           </div>
         ) : (

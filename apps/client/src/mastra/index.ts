@@ -3,9 +3,11 @@ import { MastraEditor } from "@mastra/editor";
 import { MCPServer } from "@mastra/mcp";
 import { portmaxAssistant } from "./agents/portmax-assistant.js";
 import { portmaxChatRoute } from "./chat/portmax-chat-route.js";
+import { suspendResumeDemoResumeRoute, suspendResumeDemoStartRoute } from "./chat/suspend-resume-demo-route.js";
 import { portmaxTools } from "./mcp/client.js";
 import { getCurrentTime } from "./tools/current-time.js";
 import { mastraSmokeWorkflow } from "./workflows/mastra-smoke-workflow.js";
+import { suspendAndResumeWorkflow } from "./workflows/suspend-and-resume-workflow.js";
 import { portmaxCreateWorkflow, portmaxTextMetricsWorkflow } from "./workflows/portmax/index.js";
 
 const maxCredentialLength = 4096;
@@ -50,6 +52,7 @@ export const mastra = new Mastra({
   agents: { portmaxAssistant },
   workflows: {
     "mastra-smoke-workflow": mastraSmokeWorkflow,
+    "suspend-and-resume-workflow": suspendAndResumeWorkflow,
     "portmax-create-workflow": portmaxCreateWorkflow,
     "portmax-text-metrics-workflow": portmaxTextMetricsWorkflow,
   },
@@ -77,12 +80,16 @@ export const mastra = new Mastra({
         handler: (c, next) => addPortmaxRequestContext(c, next, true),
       },
       {
+        path: "/desktop-demo/*",
+        handler: (c, next) => addPortmaxRequestContext(c, next, true),
+      },
+      {
         // Tool discovery remains public; calls to Portmax tools can provide these
         // headers and they will be forwarded by the MCP client to portmax_api.
         path: "/mcp/*",
         handler: (c, next) => addPortmaxRequestContext(c, next, false),
       },
     ],
-    apiRoutes: [portmaxChatRoute],
+    apiRoutes: [portmaxChatRoute, suspendResumeDemoStartRoute, suspendResumeDemoResumeRoute],
   },
 });

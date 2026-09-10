@@ -113,7 +113,11 @@ async function forwardChatRequest(request: IncomingMessage, response: ServerResp
     return;
   }
 
-  if (request.method !== "POST" || !request.url?.startsWith("/chat/")) {
+  const requestUrl = request.url;
+  const isChatRequest = request.method === "POST" && requestUrl?.startsWith("/chat/");
+  const isSuspendResumeDemoRequest = request.method === "POST"
+    && (requestUrl === "/desktop-demo/suspend-resume/start" || requestUrl === "/desktop-demo/suspend-resume/resume");
+  if (!requestUrl || (!isChatRequest && !isSuspendResumeDemoRequest)) {
     response.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "Not found." }));
     return;
   }
@@ -127,7 +131,7 @@ async function forwardChatRequest(request: IncomingMessage, response: ServerResp
     }
 
     const requestBody = (await readChatRequestBody(request)).toString("utf8");
-    const upstreamResponse = await fetch(new URL(request.url, serviceEndpoints.mastraServerUrl), {
+    const upstreamResponse = await fetch(new URL(requestUrl, serviceEndpoints.mastraServerUrl), {
       method: "POST",
       headers: upstreamHeaders,
       body: requestBody,
