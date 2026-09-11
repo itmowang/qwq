@@ -58,16 +58,22 @@ type SuspendResumeChatOption = {
   value: string;
   label: string;
 };
+type DeliveryAddressOption = {
+  id: string;
+  name: string;
+  address: string;
+};
 type SuspendResumeChatInteraction =
   | {
     kind: "suspend-resume-chat-v1";
     status: "suspended";
     runId: string;
-    stepId: "suspend-and-resume-select-warehouse" | "suspend-and-resume-confirm-selection";
+    stepId: "suspend-and-resume-select-warehouse" | "suspend-and-resume-select-delivery-address" | "suspend-and-resume-confirm-selection";
     title: string;
     prompt: string;
     options: SuspendResumeChatOption[];
     selectedWarehouse?: WarehouseOption;
+    selectedDeliveryAddress?: DeliveryAddressOption;
   }
   | {
     kind: "suspend-resume-chat-v1";
@@ -75,18 +81,18 @@ type SuspendResumeChatInteraction =
     runId: string;
     title: string;
     selectedWarehouse: WarehouseOption;
+    selectedDeliveryAddress: DeliveryAddressOption;
     decision: "approve" | "reject";
     message: string;
-    completedSteps: 3;
+    completedSteps: 4;
   };
 type SuspendResumeChatSelection = {
   sourceMessageId: string;
   runId: string;
-  stepId: "suspend-and-resume-select-warehouse" | "suspend-and-resume-confirm-selection";
+  stepId: "suspend-and-resume-select-warehouse" | "suspend-and-resume-select-delivery-address" | "suspend-and-resume-confirm-selection";
   title: string;
   optionValue: string;
   optionLabel: string;
-  selectedWarehouseId?: string;
 };
 
 const warehouseWorkflowName = "portmax-create-workflow";
@@ -186,24 +192,35 @@ function parseSuspendResumeChatInteraction(value: unknown): SuspendResumeChatInt
     const stepId = record.stepId;
     const prompt = optionalNonBlankString(record.prompt);
     const options = parseSuspendResumeChatOptions(record.options);
-    if ((stepId !== "suspend-and-resume-select-warehouse" && stepId !== "suspend-and-resume-confirm-selection") || !prompt || !options) return null;
+    if ((stepId !== "suspend-and-resume-select-warehouse" && stepId !== "suspend-and-resume-select-delivery-address" && stepId !== "suspend-and-resume-confirm-selection") || !prompt || !options) return null;
 
     const selectedWarehouse = record.selectedWarehouse === undefined ? undefined : parseWarehouseOption(record.selectedWarehouse);
-    if (record.selectedWarehouse !== undefined && !selectedWarehouse) return null;
-    if (stepId === "suspend-and-resume-select-warehouse" && (options.length !== 5 || selectedWarehouse)) return null;
-    if (stepId === "suspend-and-resume-confirm-selection" && (options.length !== 2 || !selectedWarehouse)) return null;
+    const selectedDeliveryAddress = record.selectedDeliveryAddress === undefined ? undefined : parseDeliveryAddressOption(record.selectedDeliveryAddress);
+    if ((record.selectedWarehouse !== undefined && !selectedWarehouse) || (record.selectedDeliveryAddress !== undefined && !selectedDeliveryAddress)) return null;
+    if (stepId === "suspend-and-resume-select-warehouse" && (options.length !== 5 || selectedWarehouse || selectedDeliveryAddress)) return null;
+    if (stepId === "suspend-and-resume-select-delivery-address" && (options.length !== 3 || !selectedWarehouse || selectedDeliveryAddress)) return null;
+    if (stepId === "suspend-and-resume-confirm-selection" && (options.length !== 2 || !selectedWarehouse || !selectedDeliveryAddress)) return null;
 
-    return { kind: "suspend-resume-chat-v1", status: "suspended", runId: record.runId, stepId, title, prompt, options, ...(selectedWarehouse ? { selectedWarehouse } : {}) };
+    return { kind: "suspend-resume-chat-v1", status: "suspended", runId: record.runId, stepId, title, prompt, options, ...(selectedWarehouse ? { selectedWarehouse } : {}), ...(selectedDeliveryAddress ? { selectedDeliveryAddress } : {}) };
   }
 
   if (record.status === "completed") {
     const selectedWarehouse = parseWarehouseOption(record.selectedWarehouse);
+    const selectedDeliveryAddress = parseDeliveryAddressOption(record.selectedDeliveryAddress);
     const message = optionalNonBlankString(record.message);
-    if (!selectedWarehouse || !message || (record.decision !== "approve" && record.decision !== "reject") || record.completedSteps !== 3) return null;
-    return { kind: "suspend-resume-chat-v1", status: "completed", runId: record.runId, title, selectedWarehouse, decision: record.decision, message, completedSteps: 3 };
+    if (!selectedWarehouse || !selectedDeliveryAddress || !message || (record.decision !== "approve" && record.decision !== "reject") || record.completedSteps !== 4) return null;
+    return { kind: "suspend-resume-chat-v1", status: "completed", runId: record.runId, title, selectedWarehouse, selectedDeliveryAddress, decision: record.decision, message, completedSteps: 4 };
   }
 
   return null;
+}
+
+function parseDeliveryAddressOption(value: unknown): DeliveryAddressOption | null {
+  if (!isRecord(value)) return null;
+  const id = optionalNonBlankString(value.id);
+  const name = optionalNonBlankString(value.name);
+  const address = optionalNonBlankString(value.address);
+  return id && name && address ? { id, name, address } : null;
 }
 
 function parseWarehouseOption(value: unknown): WarehouseOption | null {
@@ -263,9 +280,7 @@ function parseSuspendResumeChatSelection(text: string): SuspendResumeChatSelecti
   const title = optionalNonBlankString(value.title);
   const optionValue = optionalNonBlankString(value.optionValue);
   const optionLabel = optionalNonBlankString(value.optionLabel);
-  const selectedWarehouseId = optionalNonBlankString(value.selectedWarehouseId);
-  if (!title || !optionValue || !optionLabel || (value.stepId !== "suspend-and-resume-select-warehouse" && value.stepId !== "suspend-and-resume-confirm-selection")) return null;
-  if (value.stepId === "suspend-and-resume-confirm-selection" && !selectedWarehouseId) return null;
+  if (!title || !optionValue || !optionLabel || (value.stepId !== "suspend-and-resume-select-warehouse" && value.stepId !== "suspend-and-resume-select-delivery-address" && value.stepId !== "suspend-and-resume-confirm-selection")) return null;
   return {
     sourceMessageId: value.sourceMessageId,
     runId: value.runId,
@@ -273,7 +288,6 @@ function parseSuspendResumeChatSelection(text: string): SuspendResumeChatSelecti
     title,
     optionValue,
     optionLabel,
-    ...(selectedWarehouseId ? { selectedWarehouseId } : {}),
   };
 }
 
@@ -435,6 +449,7 @@ function SuspendResumeChatInteractionPart({
     <div className="warehouse-options">
       <p className="warehouse-options__summary">{interaction.prompt}</p>
       {interaction.selectedWarehouse ? <p className="warehouse-options__summary">当前仓库：{interaction.selectedWarehouse.name}</p> : null}
+      {interaction.selectedDeliveryAddress ? <p className="warehouse-options__summary">派送地址：{interaction.selectedDeliveryAddress.name}（{interaction.selectedDeliveryAddress.address}）</p> : null}
       <div className="warehouse-options__list">
         {interaction.options.map((option) => {
           const selectionKey = suspendResumeSelectionKey(sourceMessageId, interaction.runId, interaction.stepId, option.value);
@@ -869,9 +884,6 @@ function ConversationPanel({
     const selectionKey = suspendResumeSelectionKey(sourceMessageId, interaction.runId, interaction.stepId, option.value);
     if (!canSend || selectedSuspendResumeKeys.has(selectionKey) || pendingSuspendResumeSelectionKeysRef.current.has(selectionKey)) return;
 
-    const selectedWarehouseId = interaction.selectedWarehouse?.id;
-    if (interaction.stepId === "suspend-and-resume-confirm-selection" && !selectedWarehouseId) return;
-
     pendingSuspendResumeSelectionKeysRef.current.add(selectionKey);
     shouldAutoScrollRef.current = true;
     const selection: SuspendResumeChatSelection = {
@@ -881,7 +893,6 @@ function ConversationPanel({
       title: interaction.title,
       optionValue: option.value,
       optionLabel: option.label,
-      ...(selectedWarehouseId ? { selectedWarehouseId } : {}),
     };
     void sendMessage({ text: `${suspendResumeSelectionPrefix}${JSON.stringify(selection)}` })
       .catch(() => pendingSuspendResumeSelectionKeysRef.current.delete(selectionKey));
