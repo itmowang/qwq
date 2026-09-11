@@ -17,6 +17,17 @@ export const resumeSuspendResumeChatToolId = "resume-suspend-resume-chat";
 const titleSchema = z.string().trim().min(1).max(120);
 const warehouseSchema = z.object({ id: warehouseIdSchema, name: z.string() });
 const optionSchema = z.object({ value: z.string(), label: z.string() });
+const warehouseSelectionSuspendPayloadSchema = z.object({
+  title: titleSchema,
+  prompt: z.string(),
+  options: z.array(optionSchema).length(5),
+});
+const confirmationSuspendPayloadSchema = z.object({
+  title: titleSchema,
+  warehouse: warehouseSchema,
+  prompt: z.string(),
+  options: z.array(optionSchema).length(2),
+});
 const suspendedInteractionSchema = z.object({
   kind: z.literal("suspend-resume-chat-v1"),
   status: z.literal("suspended"),
@@ -58,34 +69,53 @@ const resumeInputSchema = z.discriminatedUnion("stepId", [
   }),
 ]);
 
-function toWarehouseOptions() {
-  return warehouseOptions.map((warehouse) => ({ value: warehouse.id, label: warehouse.name }));
-}
-
 /**
- * Starts the workflow from a chat tool call and surfaces its first suspension as
- * structured tool output. The Desktop renders this output in the assistant message.
+ * Starts the workflow from a chat tool call and returns its actual first
+ * suspension. The adapter reads Mastra's persisted snapshot so it never repeats
+ * or attempts to reproduce the LLM intent parsing that occurred in the workflow.
  */
 export const startSuspendResumeChatTool = createTool({
   id: startSuspendResumeChatToolId,
-  description: "启动三步仓库选择示例。仅在用户明确要求开始仓库选择、确认或 Suspend/Resume 演示时调用。",
+  description: "启动无副作用的仓库确认流程。传入用户的完整原始请求作为 title；workflow 使用 LLM 解析仓库线索，唯一匹配时进入确认，无法唯一匹配时展示仓库选择。",
   inputSchema: z.object({ title: titleSchema.default("发布示例配置") }),
   outputSchema: suspendedInteractionSchema,
   execute: async ({ title }) => {
     const runId = crypto.randomUUID();
     const run = await suspendAndResumeWorkflow.createRun({ runId });
     const result = await run.start({ inputData: { title } });
-    if (result.status !== "suspended") throw new Error("仓库选择 workflow 未进入暂停状态。");
+    if (result.status !== "suspended") throw new Error("仓库确认 workflow 未进入暂停状态。");
 
-    return {
-      kind: "suspend-resume-chat-v1" as const,
-      status: "suspended" as const,
-      runId,
-      stepId: suspendResumeWarehouseSelectionStepId as typeof suspendResumeWarehouseSelectionStepId,
-      title,
-      prompt: "第 1 步（共 3 步）：请选择要处理的仓库。",
-      options: toWarehouseOptions(),
-    };
+    const snapshot = await suspendAndResumeWorkflow.getWorkflowRunById(runId, { fields: ["steps"] });
+    const confirmationStep = snapshot?.steps?.[suspendResumeConfirmationStepId];
+    const confirmation = confirmationSuspendPayloadSchema.safeParse(
+      Array.isArray(confirmationStep) ? undefined : confirmationStep?.suspendPayload,
+    );
+    if (confirmation.success) {
+      return {
+        kind: "suspend-resume-chat-v1" as const,
+        status: "suspended" as const,
+        runId,
+        stepId: suspendResumeConfirmationStepId as typeof suspendResumeConfirmationStepId,
+        ...confirmation.data,
+        selectedWarehouse: confirmation.data.warehouse,
+      };
+    }
+
+    const selectionStep = snapshot?.steps?.[suspendResumeWarehouseSelectionStepId];
+    const selection = warehouseSelectionSuspendPayloadSchema.safeParse(
+      Array.isArray(selectionStep) ? undefined : selectionStep?.suspendPayload,
+    );
+    if (selection.success) {
+      return {
+        kind: "suspend-resume-chat-v1" as const,
+        status: "suspended" as const,
+        runId,
+        stepId: suspendResumeWarehouseSelectionStepId as typeof suspendResumeWarehouseSelectionStepId,
+        ...selection.data,
+      };
+    }
+
+    throw new Error("仓库确认 workflow 的暂停数据无效。");
   },
 });
 
@@ -95,7 +125,7 @@ export const startSuspendResumeChatTool = createTool({
  */
 export const resumeSuspendResumeChatTool = createTool({
   id: resumeSuspendResumeChatToolId,
-  description: "恢复三步仓库选择示例。只在 PORTMAX_SUSPEND_RESUME_SELECTION_V1 聊天选择标记出现时调用，并且只使用标记中的结构化字段。",
+  description: "恢复仓库确认流程。只在 PORTMAX_SUSPEND_RESUME_SELECTION_V1 聊天选择标记出现时调用，并且只使用标记中的结构化字段。",
   inputSchema: resumeInputSchema,
   outputSchema: interactionOutputSchema,
   execute: async (input) => {
@@ -109,7 +139,7 @@ export const resumeSuspendResumeChatTool = createTool({
         step: suspendAndResumeWarehouseSelectionStep,
         resumeData: { warehouseId: input.optionValue },
       });
-      if (result.status !== "suspended") throw new Error("仓库选择 workflow 未进入确认暂停状态。");
+      if (result.status !== "suspended") throw new Error("仓库确认 workflow 未进入最终确认暂停状态。");
 
       return {
         kind: "suspend-resume-chat-v1" as const,
@@ -118,7 +148,7 @@ export const resumeSuspendResumeChatTool = createTool({
         stepId: suspendResumeConfirmationStepId as typeof suspendResumeConfirmationStepId,
         title: input.title,
         selectedWarehouse,
-        prompt: `第 2 步（共 3 步）：已选择“${selectedWarehouse.name}”，是否确认继续？`,
+        prompt: `已选择“${selectedWarehouse.name}”，是否确认继续？`,
         options: [
           { value: "approve", label: "确认并继续" },
           { value: "reject", label: "取消" },
@@ -133,7 +163,7 @@ export const resumeSuspendResumeChatTool = createTool({
       step: suspendAndResumeConfirmationStep,
       resumeData: { decision: input.optionValue },
     });
-    if (result.status === "suspended") throw new Error("仓库选择 workflow 恢复后仍处于暂停状态。");
+    if (result.status === "suspended") throw new Error("仓库确认 workflow 恢复后仍处于暂停状态。");
 
     return {
       kind: "suspend-resume-chat-v1" as const,
