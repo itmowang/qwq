@@ -115,9 +115,7 @@ async function forwardChatRequest(request: IncomingMessage, response: ServerResp
 
   const requestUrl = request.url;
   const isChatRequest = request.method === "POST" && requestUrl?.startsWith("/chat/");
-  const isSuspendResumeDemoRequest = request.method === "POST"
-    && (requestUrl === "/desktop-demo/suspend-resume/start" || requestUrl === "/desktop-demo/suspend-resume/resume");
-  if (!requestUrl || (!isChatRequest && !isSuspendResumeDemoRequest)) {
+  if (!requestUrl || !isChatRequest) {
     response.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "Not found." }));
     return;
   }
