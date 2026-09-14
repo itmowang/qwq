@@ -7,7 +7,7 @@ import { portmaxTools } from "./mcp/client.js";
 import { getCurrentTime } from "./tools/current-time.js";
 import { mastraSmokeWorkflow } from "./workflows/mastra-smoke-workflow.js";
 import { suspendAndResumeWorkflow } from "./workflows/suspend-and-resume-workflow.js";
-import { portmaxCreateWorkflow, portmaxTextMetricsWorkflow } from "./workflows/portmax/index.js";
+import { createAppointmentWorkflow, portmaxTextMetricsWorkflow } from "./workflows/portmax/index.js";
 
 const maxCredentialLength = 4096;
 const maxTenantIdLength = 128;
@@ -52,7 +52,7 @@ export const mastra = new Mastra({
   workflows: {
     "mastra-smoke-workflow": mastraSmokeWorkflow,
     "suspend-and-resume-workflow": suspendAndResumeWorkflow,
-    "portmax-create-workflow": portmaxCreateWorkflow,
+    "create-appointment-workflow": createAppointmentWorkflow,
     "portmax-text-metrics-workflow": portmaxTextMetricsWorkflow,
   },
   mcpServers: { "local-tools": localToolsMcpServer },

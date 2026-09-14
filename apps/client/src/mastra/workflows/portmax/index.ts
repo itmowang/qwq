@@ -1,2 +1,2 @@
-export { portmaxCreateWorkflow } from "./portmax-create-workflow.js";
+export { createAppointmentWorkflow } from "./create-appointment-workflow.js";
 export { portmaxTextMetricsWorkflow } from "./portmax-text-metrics-workflow.js";

@@ -33,6 +33,12 @@ const dictionarySchema = {
   code: z.string().trim().min(1).describe("Portmax 字典编码。"),
 };
 
+const warehouseSettingsSchema = {
+  warehouseName: z.string().trim().max(120).default("").describe("可选仓库名称筛选；空字符串查询全部可见仓库。"),
+};
+
+const addOnProductSchema = {};
+
 function getOutboundScheduleCredentials(sessionCredentials: McpSessionCredentials | undefined): McpSessionCredentials {
   const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH?.trim();
 
@@ -101,6 +107,112 @@ export function createMcpTransport(options: McpTransportOptions = {}) {
       } catch (error) {
         return {
           content: [{ type: "text", text: error instanceof Error ? error.message : "字典查询失败。" }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  const getWarehouseSettingsCredentials = (): McpSessionCredentials => {
+    const sessionCredentials = options.getSessionCredentials?.();
+    const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_WAREHOUSE_SETTINGS_BLADE_AUTH?.trim();
+
+    if (!bladeAuth) {
+      throw new Error(
+        "发起仓库设置查询前必须在 MCP 请求中提供 X-Portmax-Blade-Auth，或配置 PORTMAX_WAREHOUSE_SETTINGS_BLADE_AUTH。",
+      );
+    }
+
+    return { bladeAuth, tenantId: sessionCredentials?.tenantId };
+  };
+
+  server.registerTool(
+    "get_warehouse_settings",
+    {
+      title: "查询预约单仓库设置",
+      description: "查询可用于创建预约单的仓库设置；请求路径和方法已固定，可选 warehouseName 仅用于名称筛选。",
+      inputSchema: warehouseSettingsSchema,
+    },
+    async ({ warehouseName }) => {
+      try {
+        const credentials = getWarehouseSettingsCredentials();
+        const query = new URLSearchParams({ warehouseName });
+        const upstreamResponse = await forwardUpstream({
+          path: `/api/blade-shipment/setting/getSettingByWarehouseName?${query.toString()}`,
+          method: "GET",
+          headers: {
+            accept: "application/json, text/plain, */*",
+            "blade-auth": credentials.bladeAuth,
+            "blade-requested-with": "BladeHttpRequest",
+            ...(credentials.tenantId ? { "tenant-id": credentials.tenantId } : {}),
+          },
+          // 使用当前 MCP session 的 Blade-Auth，不使用服务级 Authorization 请求头。
+          authorization: "",
+        });
+        const text = await upstreamResponse.text();
+        const summary = JSON.stringify(
+          {
+            status: upstreamResponse.status,
+            contentType: upstreamResponse.headers.get("content-type"),
+            body: text,
+          },
+          null,
+          2,
+        );
+
+        return {
+          content: [{ type: "text", text: summary }],
+          isError: !upstreamResponse.ok,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : "仓库设置查询失败。" }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_add_on_products",
+    {
+      title: "查询预约单附加产品",
+      description: "查询创建预约单可选择的 Add-on Product；请求路径、方法及 serviceCategory=Warehouse 均已固定。",
+      inputSchema: addOnProductSchema,
+    },
+    async () => {
+      try {
+        const credentials = getWarehouseSettingsCredentials();
+        const upstreamResponse = await forwardUpstream({
+          path: "/api/blade-service/portmax/service/query/service/onProduct/name?serviceCategory=Warehouse",
+          method: "GET",
+          headers: {
+            accept: "application/json, text/plain, */*",
+            "blade-auth": credentials.bladeAuth,
+            "blade-requested-with": "BladeHttpRequest",
+            ...(credentials.tenantId ? { "tenant-id": credentials.tenantId } : {}),
+          },
+          // 使用当前 MCP session 的 Blade-Auth，不使用服务级 Authorization 请求头。
+          authorization: "",
+        });
+        const text = await upstreamResponse.text();
+        const summary = JSON.stringify(
+          {
+            status: upstreamResponse.status,
+            contentType: upstreamResponse.headers.get("content-type"),
+            body: text,
+          },
+          null,
+          2,
+        );
+
+        return {
+          content: [{ type: "text", text: summary }],
+          isError: !upstreamResponse.ok,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : "附加产品查询失败。" }],
           isError: true,
         };
       }

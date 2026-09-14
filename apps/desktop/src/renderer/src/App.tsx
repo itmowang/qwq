@@ -44,16 +44,6 @@ type WarehouseOption = {
   id?: string;
   warehouseId?: string;
 };
-type WarehouseCandidatesOutput = {
-  warehouseName: string;
-  total: number;
-  truncated: boolean;
-  warehouseOptions: WarehouseOption[];
-};
-type WarehouseSelection = {
-  sourceMessageId: string;
-  warehouse: WarehouseOption;
-};
 type SuspendResumeChatOption = {
   value: string;
   label: string;
@@ -94,15 +84,73 @@ type SuspendResumeChatSelection = {
   optionValue: string;
   optionLabel: string;
 };
+type AppointmentWarehouseOption = {
+  value: string;
+  id: string;
+  warehouseId: string;
+  name: string;
+  label: string;
+};
+type AppointmentAddOnProductOption = {
+  value: string;
+  code: string;
+  name: string;
+  label: string;
+};
+type AppointmentSelectionInteraction =
+  | {
+    kind: "appointment-selection-v1";
+    status: "suspended";
+    runId: string;
+    stepId: "create-appointment-select-warehouse-name";
+    title: string;
+    prompt: string;
+    total: number;
+    truncated: boolean;
+    options: AppointmentWarehouseOption[];
+  }
+  | {
+    kind: "appointment-selection-v1";
+    status: "suspended";
+    runId: string;
+    stepId: "create-appointment-select-add-on-product";
+    title: string;
+    warehouse: AppointmentWarehouseOption;
+    prompt: string;
+    total: number;
+    truncated: boolean;
+    options: AppointmentAddOnProductOption[];
+  }
+  | {
+    kind: "appointment-selection-v1";
+    status: "completed";
+    runId: string;
+    title: string;
+    warehouse: AppointmentWarehouseOption;
+    addOnProduct: AppointmentAddOnProductOption;
+    message: string;
+    completedSteps: 3;
+  };
+type AppointmentSelection = {
+  sourceMessageId: string;
+  runId: string;
+  stepId: "create-appointment-select-warehouse-name" | "create-appointment-select-add-on-product";
+  title: string;
+  optionValue: string;
+  optionLabel: string;
+};
 
-const warehouseWorkflowName = "portmax-create-workflow";
 const suspendResumeStartToolName = "start-suspend-resume-chat";
 const suspendResumeResumeToolName = "resume-suspend-resume-chat";
 const suspendResumeStartToolKey = "startSuspendResumeChatTool";
 const suspendResumeResumeToolKey = "resumeSuspendResumeChatTool";
-const warehouseSelectionPrefix = "PORTMAX_WAREHOUSE_SELECTION_V1 ";
+const appointmentStartToolName = "start-create-appointment-chat";
+const appointmentResumeToolName = "resume-create-appointment-chat";
+const appointmentStartToolKey = "startCreateAppointmentChatTool";
+const appointmentResumeToolKey = "resumeCreateAppointmentChatTool";
 const suspendResumeSelectionPrefix = "PORTMAX_SUSPEND_RESUME_SELECTION_V1 ";
-const maxWarehouseCandidates = 20;
+const appointmentSelectionPrefix = "PORTMAX_APPOINTMENT_SELECTION_V1 ";
+const maxAppointmentWarehouseOptions = 100;
 const maxAttachmentsPerMessage = 3;
 const maxAttachmentSizeBytes = 4 * 1024 * 1024;
 const maxAttachmentTotalBytes = 8 * 1024 * 1024;
@@ -233,45 +281,6 @@ function parseWarehouseOption(value: unknown): WarehouseOption | null {
   return { name, ...(id ? { id } : {}), ...(warehouseId ? { warehouseId } : {}) };
 }
 
-function parseWarehouseCandidatesOutput(value: unknown): WarehouseCandidatesOutput | null {
-  const record = parseJsonObject(value);
-  if (!isRecord(record)) return null;
-
-  const total = record.total;
-  if (typeof record.warehouseName !== "string"
-    || typeof total !== "number"
-    || !Number.isSafeInteger(total)
-    || total < 0
-    || typeof record.truncated !== "boolean"
-    || !Array.isArray(record.warehouseOptions)
-    || record.warehouseOptions.length > maxWarehouseCandidates) {
-    return null;
-  }
-
-  const warehouseOptions = record.warehouseOptions.map(parseWarehouseOption);
-  if (warehouseOptions.some((option) => option === null)) return null;
-
-  return {
-    warehouseName: record.warehouseName,
-    total,
-    truncated: record.truncated,
-    warehouseOptions: warehouseOptions as WarehouseOption[],
-  };
-}
-
-function warehouseOptionKey(sourceMessageId: string, warehouse: WarehouseOption): string {
-  return `${sourceMessageId}:${warehouse.id ?? ""}:${warehouse.warehouseId ?? ""}:${warehouse.name}`;
-}
-
-function parseWarehouseSelection(text: string): WarehouseSelection | null {
-  if (!text.startsWith(warehouseSelectionPrefix)) return null;
-
-  const value = parseJsonObject(text.slice(warehouseSelectionPrefix.length));
-  if (!isRecord(value) || typeof value.sourceMessageId !== "string" || !value.sourceMessageId) return null;
-  const warehouse = parseWarehouseOption(value.warehouse);
-  return warehouse ? { sourceMessageId: value.sourceMessageId, warehouse } : null;
-}
-
 function parseSuspendResumeChatSelection(text: string): SuspendResumeChatSelection | null {
   if (!text.startsWith(suspendResumeSelectionPrefix)) return null;
 
@@ -305,13 +314,128 @@ function selectedSuspendResumeOptionKeys(messages: UIMessage[]): Set<string> {
   );
 }
 
-function selectedWarehouseOptionKeys(messages: UIMessage[]): Set<string> {
+function parseAppointmentWarehouseOptions(value: unknown): AppointmentWarehouseOption[] | null {
+  if (!Array.isArray(value) || value.length > maxAppointmentWarehouseOptions) return null;
+  const options = value.map((option) => {
+    if (!isRecord(option)) return null;
+    const valueText = optionalNonBlankString(option.value);
+    const id = optionalNonBlankString(option.id);
+    const warehouseId = optionalNonBlankString(option.warehouseId);
+    const name = optionalNonBlankString(option.name);
+    const label = optionalNonBlankString(option.label);
+    return valueText && id && warehouseId && name && label ? { value: valueText, id, warehouseId, name, label } : null;
+  });
+  return options.some((option) => option === null) ? null : options as AppointmentWarehouseOption[];
+}
+
+function parseAppointmentAddOnProductOptions(value: unknown): AppointmentAddOnProductOption[] | null {
+  if (!Array.isArray(value) || value.length > maxAppointmentWarehouseOptions) return null;
+  const options = value.map((option) => {
+    if (!isRecord(option)) return null;
+    const valueText = optionalNonBlankString(option.value);
+    const code = optionalNonBlankString(option.code);
+    const name = optionalNonBlankString(option.name);
+    const label = optionalNonBlankString(option.label);
+    return valueText && code && name && label ? { value: valueText, code, name, label } : null;
+  });
+  return options.some((option) => option === null) ? null : options as AppointmentAddOnProductOption[];
+}
+
+function parseAppointmentSelectionInteraction(value: unknown): AppointmentSelectionInteraction | null {
+  const record = parseJsonObject(value);
+  if (!isRecord(record) || record.kind !== "appointment-selection-v1" || !isUuid(record.runId)) return null;
+
+  const title = optionalNonBlankString(record.title);
+  if (!title) return null;
+
+  if (record.status === "suspended") {
+    const prompt = optionalNonBlankString(record.prompt);
+    if (!prompt
+      || typeof record.total !== "number"
+      || !Number.isSafeInteger(record.total)
+      || record.total < 0
+      || typeof record.truncated !== "boolean") return null;
+
+    if (record.stepId === "create-appointment-select-warehouse-name") {
+      const options = parseAppointmentWarehouseOptions(record.options);
+      if (!options) return null;
+      return {
+        kind: "appointment-selection-v1",
+        status: "suspended",
+        runId: record.runId,
+        stepId: "create-appointment-select-warehouse-name",
+        title,
+        prompt,
+        total: record.total,
+        truncated: record.truncated,
+        options,
+      };
+    }
+
+    if (record.stepId === "create-appointment-select-add-on-product") {
+      const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
+      const options = parseAppointmentAddOnProductOptions(record.options);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !options) return null;
+      return {
+        kind: "appointment-selection-v1",
+        status: "suspended",
+        runId: record.runId,
+        stepId: "create-appointment-select-add-on-product",
+        title,
+        warehouse: warehouseOptions[0],
+        prompt,
+        total: record.total,
+        truncated: record.truncated,
+        options,
+      };
+    }
+
+    return null;
+  }
+
+  if (record.status === "completed") {
+    const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
+    const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
+    const message = optionalNonBlankString(record.message);
+    if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !message || record.completedSteps !== 3) return null;
+    return {
+      kind: "appointment-selection-v1",
+      status: "completed",
+      runId: record.runId,
+      title,
+      warehouse: warehouseOptions[0],
+      addOnProduct: addOnProducts[0],
+      message,
+      completedSteps: 3,
+    };
+  }
+
+  return null;
+}
+
+function parseAppointmentSelection(text: string): AppointmentSelection | null {
+  if (!text.startsWith(appointmentSelectionPrefix)) return null;
+
+  const value = parseJsonObject(text.slice(appointmentSelectionPrefix.length));
+  if (!isRecord(value) || typeof value.sourceMessageId !== "string" || !value.sourceMessageId || !isUuid(value.runId)) return null;
+  const title = optionalNonBlankString(value.title);
+  const optionValue = optionalNonBlankString(value.optionValue);
+  const optionLabel = optionalNonBlankString(value.optionLabel);
+  if (!title || !optionValue || !optionLabel || (value.stepId !== "create-appointment-select-warehouse-name" && value.stepId !== "create-appointment-select-add-on-product")) return null;
+  return { sourceMessageId: value.sourceMessageId, runId: value.runId, stepId: value.stepId, title, optionValue, optionLabel };
+}
+
+function appointmentSelectionKey(sourceMessageId: string, runId: string, stepId: string, optionValue: string): string {
+  return `${sourceMessageId}:${runId}:${stepId}:${optionValue}`;
+}
+
+function selectedAppointmentOptionKeys(messages: UIMessage[]): Set<string> {
   return new Set(
     messages
       .filter((message) => message.role === "user")
-      .map((message) => parseWarehouseSelection(messageText(message)))
-      .filter((selection): selection is WarehouseSelection => selection !== null)
-      .map((selection) => warehouseOptionKey(selection.sourceMessageId, selection.warehouse)),
+      .map((message) => parseAppointmentSelection(messageText(message)))
+      .filter((selection): selection is AppointmentSelection => selection !== null)
+      .map((selection) => appointmentSelectionKey(selection.sourceMessageId, selection.runId, selection.stepId, selection.optionValue)),
   );
 }
 
@@ -330,12 +454,6 @@ function toolOutput(record: PartRecord): unknown {
   return record.output ?? record.result ?? record.toolResult ?? record.data;
 }
 
-function isWarehouseWorkflowResult(part: MessagePart): boolean {
-  const record = partRecord(part);
-  return record.state === "output-available"
-    && (record.toolName === warehouseWorkflowName || part.type === `tool-${warehouseWorkflowName}`);
-}
-
 function isSuspendResumeChatToolResult(part: MessagePart): boolean {
   const record = partRecord(part);
   const toolName = record.toolName;
@@ -350,11 +468,28 @@ function isSuspendResumeChatToolResult(part: MessagePart): boolean {
       || part.type === `tool-${suspendResumeResumeToolKey}`);
 }
 
+function isAppointmentSelectionToolResult(part: MessagePart): boolean {
+  const record = partRecord(part);
+  const toolName = record.toolName;
+  return record.state === "output-available"
+    && (toolName === appointmentStartToolName
+      || toolName === appointmentResumeToolName
+      || toolName === appointmentStartToolKey
+      || toolName === appointmentResumeToolKey
+      || part.type === `tool-${appointmentStartToolName}`
+      || part.type === `tool-${appointmentResumeToolName}`
+      || part.type === `tool-${appointmentStartToolKey}`
+      || part.type === `tool-${appointmentResumeToolKey}`);
+}
+
 function toolLabel(part: MessagePart): string {
   const record = partRecord(part);
   const explicitName = record.toolName;
 
-  if (explicitName === warehouseWorkflowName || part.type === `tool-${warehouseWorkflowName}`) return "仓库查询";
+  if (explicitName === appointmentStartToolName || explicitName === appointmentResumeToolName
+    || explicitName === appointmentStartToolKey || explicitName === appointmentResumeToolKey
+    || part.type === `tool-${appointmentStartToolName}` || part.type === `tool-${appointmentResumeToolName}`
+    || part.type === `tool-${appointmentStartToolKey}` || part.type === `tool-${appointmentResumeToolKey}`) return "创建预约单";
   if (explicitName === suspendResumeStartToolName || explicitName === suspendResumeResumeToolName
     || explicitName === suspendResumeStartToolKey || explicitName === suspendResumeResumeToolKey
     || part.type === `tool-${suspendResumeStartToolName}` || part.type === `tool-${suspendResumeResumeToolName}`
@@ -384,48 +519,6 @@ function toolStateLabel(state: unknown): string {
 
 function isToolCallPart(part: MessagePart): boolean {
   return part.type === "dynamic-tool" || part.type.startsWith("tool-");
-}
-
-function WarehouseCandidatesPart({
-  candidates,
-  disabled,
-  onSelect,
-  selectedOptionKeys,
-  sourceMessageId,
-}: {
-  candidates: WarehouseCandidatesOutput;
-  disabled: boolean;
-  onSelect: (sourceMessageId: string, warehouse: WarehouseOption) => void;
-  selectedOptionKeys: ReadonlySet<string>;
-  sourceMessageId: string;
-}): React.JSX.Element {
-  return (
-    <div className="warehouse-options">
-      <p className="warehouse-options__summary">共匹配到 {candidates.total} 个仓库，请选择一个继续。</p>
-      {candidates.warehouseOptions.length > 0 ? (
-        <div className="warehouse-options__list">
-          {candidates.warehouseOptions.map((warehouse) => {
-            const selectionKey = warehouseOptionKey(sourceMessageId, warehouse);
-            const selected = selectedOptionKeys.has(selectionKey);
-            return (
-              <button
-                aria-pressed={selected}
-                className={`warehouse-options__option ${selected ? "warehouse-options__option--selected" : ""}`}
-                disabled={disabled || selected}
-                key={selectionKey}
-                onClick={() => onSelect(sourceMessageId, warehouse)}
-                type="button"
-              >
-                <span>{warehouse.name}</span>
-                {selected ? <span className="warehouse-options__option-meta">已选择</span> : null}
-              </button>
-            );
-          })}
-        </div>
-      ) : <p className="warehouse-options__empty">没有匹配的仓库。</p>}
-      {candidates.truncated ? <p className="warehouse-options__truncation">仅显示部分候选仓库，请缩小名称范围后重新查询。</p> : null}
-    </div>
-  );
 }
 
 function SuspendResumeChatInteractionPart({
@@ -473,23 +566,70 @@ function SuspendResumeChatInteractionPart({
   );
 }
 
-function ToolCallPart({
-  disabledSuspendResumeSelection,
-  disabledWarehouseSelection,
-  onSuspendResumeSelect,
-  onWarehouseSelect,
-  part,
-  selectedSuspendResumeOptionKeys,
-  selectedWarehouseOptionKeys: selectedOptionKeys,
+function AppointmentSelectionInteractionPart({
+  disabled,
+  interaction,
+  onSelect,
+  selectedOptionKeys,
   sourceMessageId,
 }: {
+  disabled: boolean;
+  interaction: AppointmentSelectionInteraction;
+  onSelect: (sourceMessageId: string, interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>, option: AppointmentWarehouseOption | AppointmentAddOnProductOption) => void;
+  selectedOptionKeys: ReadonlySet<string>;
+  sourceMessageId: string;
+}): React.JSX.Element {
+  if (interaction.status === "completed") {
+    return <p className="warehouse-options__summary">{interaction.message}</p>;
+  }
+
+  return (
+    <div className="warehouse-options">
+      <p className="warehouse-options__summary">{interaction.prompt}</p>
+      {interaction.stepId === "create-appointment-select-add-on-product" ? <p className="warehouse-options__summary">已选择仓库：{interaction.warehouse.label}</p> : null}
+      {interaction.options.length > 0 ? (
+        <div className="warehouse-options__list">
+          {interaction.options.map((option) => {
+            const selectionKey = appointmentSelectionKey(sourceMessageId, interaction.runId, interaction.stepId, option.value);
+            const selected = selectedOptionKeys.has(selectionKey);
+            return (
+              <button
+                aria-pressed={selected}
+                className={`warehouse-options__option ${selected ? "warehouse-options__option--selected" : ""}`}
+                disabled={disabled || selected}
+                key={selectionKey}
+                onClick={() => onSelect(sourceMessageId, interaction, option)}
+                type="button"
+              >
+                <span>{option.label}</span>
+                {selected ? <span className="warehouse-options__option-meta">已选择</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : <p className="warehouse-options__empty">没有可选择的项目。</p>}
+      {interaction.truncated ? <p className="warehouse-options__truncation">仅显示前 {interaction.options.length} 个候选，请后续缩小查询范围。</p> : null}
+    </div>
+  );
+}
+
+function ToolCallPart({
+  disabledAppointmentSelection,
+  disabledSuspendResumeSelection,
+  onAppointmentSelect,
+  onSuspendResumeSelect,
+  part,
+  selectedAppointmentOptionKeys,
+  selectedSuspendResumeOptionKeys,
+  sourceMessageId,
+}: {
+  disabledAppointmentSelection: boolean;
   disabledSuspendResumeSelection: boolean;
-  disabledWarehouseSelection: boolean;
+  onAppointmentSelect: (sourceMessageId: string, interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>, option: AppointmentWarehouseOption | AppointmentAddOnProductOption) => void;
   onSuspendResumeSelect: (sourceMessageId: string, interaction: Extract<SuspendResumeChatInteraction, { status: "suspended" }>, option: SuspendResumeChatOption) => void;
-  onWarehouseSelect: (sourceMessageId: string, warehouse: WarehouseOption) => void;
   part: MessagePart;
+  selectedAppointmentOptionKeys: ReadonlySet<string>;
   selectedSuspendResumeOptionKeys: ReadonlySet<string>;
-  selectedWarehouseOptionKeys: ReadonlySet<string>;
   sourceMessageId: string;
 }): React.JSX.Element {
   const [isExpanded, setIsExpanded] = useState(true);
@@ -499,15 +639,15 @@ function ToolCallPart({
   const output = displayPartValue(outputValue);
   const error = displayPartValue(record.errorText ?? record.error);
   const isComplete = record.state === "output-available";
-  const isWarehouseWorkflow = isWarehouseWorkflowResult(part);
   const isSuspendResumeChatTool = isSuspendResumeChatToolResult(part);
-  const warehouseCandidates = isWarehouseWorkflow ? parseWarehouseCandidatesOutput(outputValue) : null;
+  const isAppointmentSelectionTool = isAppointmentSelectionToolResult(part);
   const suspendResumeInteraction = isSuspendResumeChatTool ? parseSuspendResumeChatInteraction(outputValue) : null;
-  const result = isWarehouseWorkflow && !warehouseCandidates
-    ? "仓库查询结果无法安全显示，请重新查询。"
-    : isSuspendResumeChatTool && !suspendResumeInteraction
-      ? "仓库确认流程结果无法安全显示，请重新开始。"
-      : output || (isComplete ? "工具调用已完成，结果已用于生成下方回答。" : "正在等待工具返回结果…");
+  const appointmentInteraction = isAppointmentSelectionTool ? parseAppointmentSelectionInteraction(outputValue) : null;
+  const result = isSuspendResumeChatTool && !suspendResumeInteraction
+    ? "仓库确认流程结果无法安全显示，请重新开始。"
+    : isAppointmentSelectionTool && !appointmentInteraction
+        ? "创建预约单的仓库选择结果无法安全显示，请重新开始。"
+        : output || (isComplete ? "工具调用已完成，结果已用于生成下方回答。" : "正在等待工具返回结果…");
 
   return (
     <section className={`tool-call tool-call--${String(record.state ?? "pending")}`}>
@@ -534,20 +674,20 @@ function ToolCallPart({
           ) : null}
           <div className="tool-call__result">
             <p>工具反馈</p>
-            {warehouseCandidates ? (
-              <WarehouseCandidatesPart
-                candidates={warehouseCandidates}
-                disabled={disabledWarehouseSelection}
-                onSelect={onWarehouseSelect}
-                selectedOptionKeys={selectedOptionKeys}
-                sourceMessageId={sourceMessageId}
-              />
-            ) : suspendResumeInteraction ? (
+            {suspendResumeInteraction ? (
               <SuspendResumeChatInteractionPart
                 disabled={disabledSuspendResumeSelection}
                 interaction={suspendResumeInteraction}
                 onSelect={onSuspendResumeSelect}
                 selectedOptionKeys={selectedSuspendResumeOptionKeys}
+                sourceMessageId={sourceMessageId}
+              />
+            ) : appointmentInteraction ? (
+              <AppointmentSelectionInteractionPart
+                disabled={disabledAppointmentSelection}
+                interaction={appointmentInteraction}
+                onSelect={onAppointmentSelect}
+                selectedOptionKeys={selectedAppointmentOptionKeys}
                 sourceMessageId={sourceMessageId}
               />
             ) : <pre>{result}</pre>}
@@ -582,35 +722,35 @@ function FileMessagePartView({ part }: { part: FileMessagePart }): React.JSX.Ele
 }
 
 function MessagePartView({
+  disabledAppointmentSelection,
   disabledSuspendResumeSelection,
-  disabledWarehouseSelection,
   isStreaming,
   messageRole,
+  onAppointmentSelect,
   onSuspendResumeSelect,
-  onWarehouseSelect,
   part,
+  selectedAppointmentOptionKeys,
   selectedSuspendResumeOptionKeys,
-  selectedWarehouseOptionKeys,
   sourceMessageId,
 }: {
+  disabledAppointmentSelection: boolean;
   disabledSuspendResumeSelection: boolean;
-  disabledWarehouseSelection: boolean;
   isStreaming: boolean;
   messageRole: UIMessage["role"];
+  onAppointmentSelect: (sourceMessageId: string, interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>, option: AppointmentWarehouseOption | AppointmentAddOnProductOption) => void;
   onSuspendResumeSelect: (sourceMessageId: string, interaction: Extract<SuspendResumeChatInteraction, { status: "suspended" }>, option: SuspendResumeChatOption) => void;
-  onWarehouseSelect: (sourceMessageId: string, warehouse: WarehouseOption) => void;
   part: MessagePart;
+  selectedAppointmentOptionKeys: ReadonlySet<string>;
   selectedSuspendResumeOptionKeys: ReadonlySet<string>;
-  selectedWarehouseOptionKeys: ReadonlySet<string>;
   sourceMessageId: string;
 }): React.JSX.Element | null {
   if (part.type === "text") {
-    const warehouseSelection = messageRole === "user" ? parseWarehouseSelection(part.text) : null;
     const suspendResumeSelection = messageRole === "user" ? parseSuspendResumeChatSelection(part.text) : null;
-    const text = suspendResumeSelection
-      ? `流程选择：${suspendResumeSelection.optionLabel}`
-      : warehouseSelection
-        ? `已选择仓库：${warehouseSelection.warehouse.name}`
+    const appointmentSelection = messageRole === "user" ? parseAppointmentSelection(part.text) : null;
+    const text = appointmentSelection
+      ? `预约仓库选择：${appointmentSelection.optionLabel}`
+      : suspendResumeSelection
+        ? `流程选择：${suspendResumeSelection.optionLabel}`
         : part.text;
     return (
       <div className={isStreaming ? "message-markdown message-markdown--streaming" : "message-markdown"}>
@@ -630,20 +770,18 @@ function MessagePartView({
     );
   }
 
-  if (part.type === "file") {
-    return <FileMessagePartView part={part} />;
-  }
+  if (part.type === "file") return <FileMessagePartView part={part} />;
 
   if (isToolCallPart(part)) {
     return (
       <ToolCallPart
+        disabledAppointmentSelection={disabledAppointmentSelection}
         disabledSuspendResumeSelection={disabledSuspendResumeSelection}
-        disabledWarehouseSelection={disabledWarehouseSelection}
+        onAppointmentSelect={onAppointmentSelect}
         onSuspendResumeSelect={onSuspendResumeSelect}
-        onWarehouseSelect={onWarehouseSelect}
         part={part}
+        selectedAppointmentOptionKeys={selectedAppointmentOptionKeys}
         selectedSuspendResumeOptionKeys={selectedSuspendResumeOptionKeys}
-        selectedWarehouseOptionKeys={selectedWarehouseOptionKeys}
         sourceMessageId={sourceMessageId}
       />
     );
@@ -723,8 +861,8 @@ function ConversationPanel({
   const skipInitialPersist = useRef(true);
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
-  const pendingWarehouseSelectionKeysRef = useRef(new Set<string>());
   const pendingSuspendResumeSelectionKeysRef = useRef(new Set<string>());
+  const pendingAppointmentSelectionKeysRef = useRef(new Set<string>());
 
   useEffect(() => {
     let isCurrent = true;
@@ -771,8 +909,8 @@ function ConversationPanel({
   });
   const isSending = status === "submitted" || status === "streaming";
   const canSend = Boolean(mcpSessionInput && serviceEndpoints && chatProxyUrl) && !isSending;
-  const selectedWarehouseKeys = useMemo(() => selectedWarehouseOptionKeys(messages), [messages]);
   const selectedSuspendResumeKeys = useMemo(() => selectedSuspendResumeOptionKeys(messages), [messages]);
+  const selectedAppointmentKeys = useMemo(() => selectedAppointmentOptionKeys(messages), [messages]);
   const scrollToBottom = useCallback((): void => {
     const container = scrollContainerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
@@ -865,15 +1003,26 @@ function ConversationPanel({
     setAttachmentError(null);
   }
 
-  function handleWarehouseSelect(sourceMessageId: string, warehouse: WarehouseOption): void {
-    const selectionKey = warehouseOptionKey(sourceMessageId, warehouse);
-    if (!canSend || selectedWarehouseKeys.has(selectionKey) || pendingWarehouseSelectionKeysRef.current.has(selectionKey)) return;
+  function handleAppointmentSelect(
+    sourceMessageId: string,
+    interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>,
+    option: AppointmentWarehouseOption | AppointmentAddOnProductOption,
+  ): void {
+    const selectionKey = appointmentSelectionKey(sourceMessageId, interaction.runId, interaction.stepId, option.value);
+    if (!canSend || selectedAppointmentKeys.has(selectionKey) || pendingAppointmentSelectionKeysRef.current.has(selectionKey)) return;
 
-    pendingWarehouseSelectionKeysRef.current.add(selectionKey);
+    pendingAppointmentSelectionKeysRef.current.add(selectionKey);
     shouldAutoScrollRef.current = true;
-    const selection: WarehouseSelection = { sourceMessageId, warehouse };
-    void sendMessage({ text: `${warehouseSelectionPrefix}${JSON.stringify(selection)}` })
-      .catch(() => pendingWarehouseSelectionKeysRef.current.delete(selectionKey));
+    const selection: AppointmentSelection = {
+      sourceMessageId,
+      runId: interaction.runId,
+      stepId: interaction.stepId,
+      title: interaction.title,
+      optionValue: option.value,
+      optionLabel: option.label,
+    };
+    void sendMessage({ text: `${appointmentSelectionPrefix}${JSON.stringify(selection)}` })
+      .catch(() => pendingAppointmentSelectionKeysRef.current.delete(selectionKey));
   }
 
   function handleSuspendResumeSelect(
@@ -965,16 +1114,16 @@ function ConversationPanel({
                     <div className="message-bubble">
                       {message.parts.map((part, index) => (
                         <MessagePartView
+                          disabledAppointmentSelection={!canSend}
                           disabledSuspendResumeSelection={!canSend}
-                          disabledWarehouseSelection={!canSend}
                           isStreaming={isStreamingMessage}
                           key={`${part.type}-${index}`}
                           messageRole={message.role}
+                          onAppointmentSelect={handleAppointmentSelect}
                           onSuspendResumeSelect={handleSuspendResumeSelect}
-                          onWarehouseSelect={handleWarehouseSelect}
                           part={part}
+                          selectedAppointmentOptionKeys={selectedAppointmentKeys}
                           selectedSuspendResumeOptionKeys={selectedSuspendResumeKeys}
-                          selectedWarehouseOptionKeys={selectedWarehouseKeys}
                           sourceMessageId={message.id}
                         />
                       ))}
