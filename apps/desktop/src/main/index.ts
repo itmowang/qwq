@@ -1,12 +1,20 @@
 import { createHash } from "crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
-import { readFile, unlink, writeFile } from "fs/promises";
+import { readFile, rename, unlink, writeFile } from "fs/promises";
 import { join } from "path";
 import { Readable } from "stream";
-import { app, BrowserWindow, ipcMain, Menu, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage } from "electron";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import icon from "../../resources/icon.png?asset";
-import type { AuthenticatedUser, LoginInput, LoginResult, ServiceEndpoints } from "../shared/auth";
+import type {
+  AuthenticatedUser,
+  LoginInput,
+  LoginResult,
+  OutboundAppointmentSaveInput,
+  OutboundAppointmentSaveResult,
+  OutboundTemplateDownloadResult,
+  ServiceEndpoints,
+} from "../shared/auth";
 
 const endpointConfigFileName = "portmax-endpoints.json";
 const defaultServiceEndpoints: ServiceEndpoints = {
@@ -262,23 +270,25 @@ function isPersistedSession(value: unknown): value is PersistedSession {
   );
 }
 
-async function restoreSession(): Promise<AuthenticatedUser | null> {
+async function readValidPersistedSession(): Promise<PersistedSession | null> {
   try {
     if (!safeStorage.isEncryptionAvailable()) return null;
 
     const encryptedSession = await readFile(sessionFilePath());
     const parsed: unknown = JSON.parse(safeStorage.decryptString(encryptedSession));
-
     if (!isPersistedSession(parsed) || parsed.expiresAt <= Date.now()) {
       await clearSavedSession();
       return null;
     }
-
-    return parsed.user;
+    return parsed;
   } catch {
     await clearSavedSession().catch(() => undefined);
     return null;
   }
+}
+
+async function restoreSession(): Promise<AuthenticatedUser | null> {
+  return (await readValidPersistedSession())?.user ?? null;
 }
 
 async function authenticationFailure(response: Response): Promise<LoginResult> {
@@ -402,6 +412,206 @@ async function login(input: LoginInput): Promise<LoginResult> {
   }
 }
 
+const outboundTemplateOrigin = "https://portmax-v2-prod.oss-cn-hangzhou.aliyuncs.com";
+const maxOutboundTemplateBytes = 8 * 1024 * 1024;
+
+function trustedOutboundTemplateUrl(value: unknown): URL | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_000) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === outboundTemplateOrigin && !url.username && !url.password
+      ? url
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function downloadOutboundTemplate(mainWindow: BrowserWindow, rawUrl: unknown): Promise<OutboundTemplateDownloadResult> {
+  const url = trustedOutboundTemplateUrl(rawUrl);
+  if (!url) return { status: "failed", message: "模板下载地址无效或不受信任。" };
+
+  const saveResult = await dialog.showSaveDialog(mainWindow, {
+    title: "另存出库附件模板",
+    defaultPath: "outbound-box-list.xlsx",
+    filters: [{ name: "Excel 模板", extensions: ["xlsx", "xls"] }],
+  });
+  if (saveResult.canceled || !saveResult.filePath) return { status: "cancelled" };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const temporaryPath = `${saveResult.filePath}.part-${process.pid}-${Date.now()}`;
+  try {
+    const response = await fetch(url, { redirect: "error", signal: controller.signal });
+    if (!response.ok) return { status: "failed", message: `模板下载失败（HTTP ${response.status}）。` };
+
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > maxOutboundTemplateBytes) {
+      return { status: "failed", message: "模板文件超过 8 MiB 限制。" };
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0) return { status: "failed", message: "模板文件为空。" };
+    if (bytes.length > maxOutboundTemplateBytes) return { status: "failed", message: "模板文件超过 8 MiB 限制。" };
+
+    await writeFile(temporaryPath, bytes, { mode: 0o600 });
+    await rename(temporaryPath, saveResult.filePath);
+    return { status: "saved", filename: "outbound-box-list.xlsx" };
+  } catch (error) {
+    return { status: "failed", message: error instanceof Error && error.name === "AbortError" ? "模板下载超时，请重试。" : "模板下载或保存失败，请重试。" };
+  } finally {
+    clearTimeout(timeout);
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+const maxOutboundAppointmentAttachmentBytes = 4 * 1024 * 1024;
+const allowedOutboundAppointmentFileTypes = new Set([
+  "",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundedString(value: unknown, minimumLength: number, maximumLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text.length >= minimumLength && text.length <= maximumLength ? text : null;
+}
+
+function validEstimatedAppointmentTime(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return false;
+  const [date, time] = value.split(" ");
+  const [year, month, day] = date.split("-").map(Number);
+  const [hour, minute, second] = time.split(":").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day
+    && parsed.getUTCHours() === hour
+    && parsed.getUTCMinutes() === minute
+    && parsed.getUTCSeconds() === second;
+}
+
+function parseOutboundAppointmentSaveInput(value: unknown): OutboundAppointmentSaveInput | null {
+  if (!isRecord(value)) return null;
+  const expectedKeys = new Set([
+    "file", "warehouseName", "source", "serviceNo", "deliveryLocation",
+    "type", "estimatedAppointmentTime", "remark", "globalUserId",
+  ]);
+  if (Object.keys(value).length !== expectedKeys.size || Object.keys(value).some((key) => !expectedKeys.has(key))) return null;
+  if (!isRecord(value.file)) return null;
+
+  const name = boundedString(value.file.name, 1, 255);
+  const type = typeof value.file.type === "string" ? value.file.type.toLowerCase() : null;
+  const bytes = value.file.bytes;
+  const warehouseName = boundedString(value.warehouseName, 1, 240);
+  const source = boundedString(value.source, 0, 240);
+  const serviceNo = boundedString(value.serviceNo, 1, 120);
+  const deliveryLocation = boundedString(value.deliveryLocation, 1, 120);
+  const remark = boundedString(value.remark, 0, 1_000);
+  const globalUserId = boundedString(value.globalUserId, 1, 120);
+  const estimatedAppointmentTime = boundedString(value.estimatedAppointmentTime, 19, 19);
+
+  if (!name || /[\\/\u0000-\u001f]/.test(name) || !/\.(xlsx|xls)$/i.test(name)
+    || type === null || !allowedOutboundAppointmentFileTypes.has(type)
+    || !(bytes instanceof ArrayBuffer) || bytes.byteLength === 0 || bytes.byteLength > maxOutboundAppointmentAttachmentBytes
+    || !warehouseName || source === null || !serviceNo || !deliveryLocation || remark === null || !globalUserId
+    || (value.type !== "跨境" && value.type !== "本土")
+    || !estimatedAppointmentTime || !validEstimatedAppointmentTime(estimatedAppointmentTime)) {
+    return null;
+  }
+
+  return {
+    file: { name, type, bytes },
+    warehouseName,
+    source,
+    serviceNo,
+    deliveryLocation,
+    type: value.type,
+    estimatedAppointmentTime,
+    remark,
+    globalUserId,
+  };
+}
+
+function saveResponseMessage(payload: unknown, fallback: string): string {
+  if (!isRecord(payload)) return fallback;
+  for (const key of ["msg", "message", "error"]) {
+    const message = payload[key];
+    if (typeof message === "string" && message.trim()) return message.trim().slice(0, 500);
+  }
+  return fallback;
+}
+
+async function saveOutboundAppointment(rawInput: unknown): Promise<OutboundAppointmentSaveResult> {
+  const input = parseOutboundAppointmentSaveInput(rawInput);
+  if (!input) return { success: false, message: "预约保存数据无效。请重新选择附件并从当前预约流程继续。" };
+
+  const session = await readValidPersistedSession();
+  if (!session) return { success: false, message: "登录会话已失效，请重新登录后再保存。" };
+
+  let endpoint: URL;
+  try {
+    endpoint = new URL("/outbound-schedule/save", serviceEndpoints.portmaxApiUrl);
+  } catch {
+    return { success: false, message: "本地预约保存服务地址无效。" };
+  }
+
+  const form = new FormData();
+  form.set("file", new Blob([input.file.bytes], { type: input.file.type }), input.file.name);
+  form.set("warehouseName", input.warehouseName);
+  form.set("source", input.source);
+  form.set("serviceNo", input.serviceNo);
+  form.set("deliveryLocation", input.deliveryLocation);
+  form.set("type", input.type);
+  form.set("estimatedAppointmentTime", input.estimatedAppointmentTime);
+  form.set("remark", input.remark);
+  form.set("globalUserId", input.globalUserId);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/plain, */*",
+        "x-portmax-blade-auth": session.accessToken,
+        "x-portmax-tenant-id": session.user.tenantId,
+      },
+      body: form,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload: unknown = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      // A successful upstream save may return a plain-text acknowledgement.
+    }
+    const isBusinessFailure = isRecord(payload)
+      && (payload.success === false || (typeof payload.code === "number" && payload.code >= 400));
+    if (!response.ok || isBusinessFailure) {
+      return {
+        success: false,
+        status: response.status,
+        message: saveResponseMessage(payload, `预约保存失败（HTTP ${response.status}）。`),
+      };
+    }
+    return { success: true, message: saveResponseMessage(payload, "预约单已提交并获得上游确认。") };
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return { success: false, message: "保存请求超时，结果未确认。请先在 Portmax 查询是否已创建；不要自动重试。" };
+    }
+    return { success: false, message: "保存请求未得到确认结果。请先在 Portmax 查询是否已创建；不要自动重试。" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
     width: 1040,
@@ -452,24 +662,12 @@ function createWindow(): void {
   });
 
   ipcMain.handle("auth:get-mcp-session-input", async (event) => {
-    if (event.sender !== mainWindow.webContents || !safeStorage.isEncryptionAvailable()) return null;
+    if (event.sender !== mainWindow.webContents) return null;
 
-    try {
-      const encryptedSession = await readFile(sessionFilePath());
-      const parsed: unknown = JSON.parse(safeStorage.decryptString(encryptedSession));
-      if (!isPersistedSession(parsed) || parsed.expiresAt <= Date.now()) {
-        await clearSavedSession();
-        return null;
-      }
-
-      return {
-        bladeAuth: parsed.accessToken,
-        tenantId: parsed.user.tenantId,
-      };
-    } catch {
-      await clearSavedSession().catch(() => undefined);
-      return null;
-    }
+    const session = await readValidPersistedSession();
+    return session
+      ? { bladeAuth: session.accessToken, tenantId: session.user.tenantId }
+      : null;
   });
 
   ipcMain.handle("server:get-endpoints", (event) => {
@@ -480,6 +678,20 @@ function createWindow(): void {
   ipcMain.handle("server:get-chat-proxy-url", (event) => {
     if (event.sender !== mainWindow.webContents) return null;
     return chatProxyUrl;
+  });
+
+  ipcMain.handle("appointment:download-outbound-template", async (event, rawUrl: unknown) => {
+    if (event.sender !== mainWindow.webContents) {
+      return { status: "failed", message: "无法验证模板下载请求来源。" } satisfies OutboundTemplateDownloadResult;
+    }
+    return downloadOutboundTemplate(mainWindow, rawUrl);
+  });
+
+  ipcMain.handle("appointment:save-outbound-schedule", async (event, input: unknown) => {
+    if (event.sender !== mainWindow.webContents) {
+      return { success: false, message: "无法验证预约保存请求来源。" } satisfies OutboundAppointmentSaveResult;
+    }
+    return saveOutboundAppointment(input);
   });
 
   ipcMain.handle("auth:logout", async (event) => {
@@ -493,6 +705,8 @@ function createWindow(): void {
     ipcMain.removeHandler("auth:get-mcp-session-input");
     ipcMain.removeHandler("server:get-endpoints");
     ipcMain.removeHandler("server:get-chat-proxy-url");
+    ipcMain.removeHandler("appointment:download-outbound-template");
+    ipcMain.removeHandler("appointment:save-outbound-schedule");
     ipcMain.removeHandler("auth:logout");
   });
 

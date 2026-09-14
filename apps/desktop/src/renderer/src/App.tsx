@@ -89,6 +89,8 @@ type AppointmentWarehouseOption = {
   id: string;
   warehouseId: string;
   name: string;
+  source?: string;
+  natureOfOperations?: string;
   label: string;
 };
 type AppointmentAddOnProductOption = {
@@ -97,48 +99,22 @@ type AppointmentAddOnProductOption = {
   name: string;
   label: string;
 };
+type AppointmentDeliveryLocationOption = { value: string; name: string; label: string; };
+type AppointmentTypeOption = { value: "跨境" | "本土"; name: "跨境" | "本土"; label: "跨境" | "本土"; };
+type AppointmentTaskForOption = { value: string; id: string; globalUserCode: string; name: string; label: string; };
+type AppointmentOutboundTemplate = { code: "save_outbound_template"; url: string; };
+type AppointmentSelectableOption = AppointmentWarehouseOption | AppointmentAddOnProductOption | AppointmentDeliveryLocationOption | AppointmentTypeOption | AppointmentTaskForOption | { value: string; label: string; };
 type AppointmentSelectionInteraction =
-  | {
-    kind: "appointment-selection-v1";
-    status: "suspended";
-    runId: string;
-    stepId: "create-appointment-select-warehouse-name";
-    title: string;
-    prompt: string;
-    total: number;
-    truncated: boolean;
-    options: AppointmentWarehouseOption[];
-  }
-  | {
-    kind: "appointment-selection-v1";
-    status: "suspended";
-    runId: string;
-    stepId: "create-appointment-select-add-on-product";
-    title: string;
-    warehouse: AppointmentWarehouseOption;
-    prompt: string;
-    total: number;
-    truncated: boolean;
-    options: AppointmentAddOnProductOption[];
-  }
-  | {
-    kind: "appointment-selection-v1";
-    status: "completed";
-    runId: string;
-    title: string;
-    warehouse: AppointmentWarehouseOption;
-    addOnProduct: AppointmentAddOnProductOption;
-    message: string;
-    completedSteps: 3;
-  };
-type AppointmentSelection = {
-  sourceMessageId: string;
-  runId: string;
-  stepId: "create-appointment-select-warehouse-name" | "create-appointment-select-add-on-product";
-  title: string;
-  optionValue: string;
-  optionLabel: string;
-};
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-warehouse-name"; title: string; prompt: string; total: number; truncated: boolean; options: AppointmentWarehouseOption[]; }
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-add-on-product"; title: string; warehouse: AppointmentWarehouseOption; prompt: string; total: number; truncated: boolean; options: AppointmentAddOnProductOption[]; }
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-delivery-location"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; prompt: string; total: number; truncated: boolean; options: AppointmentDeliveryLocationOption[]; }
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-appointment-type"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; prompt: string; total: number; truncated: boolean; options: AppointmentTypeOption[]; }
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-estimated-appointment-time"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; prompt: string; }
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-task-for"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; estimatedAppointmentTime: string; prompt: string; total: number; truncated: boolean; options: AppointmentTaskForOption[]; }
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-prepare-attachment"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; estimatedAppointmentTime: string; taskFor: AppointmentTaskForOption; template: AppointmentOutboundTemplate; prompt: string; };
+type AppointmentSuspendedInteraction = AppointmentSelectionInteraction;
+type AppointmentSaveInteraction = Extract<AppointmentSuspendedInteraction, { stepId: "create-appointment-prepare-attachment" }>;
+type AppointmentSelection = { sourceMessageId: string; runId: string; stepId: "create-appointment-select-warehouse-name" | "create-appointment-select-add-on-product" | "create-appointment-select-delivery-location" | "create-appointment-select-appointment-type" | "create-appointment-select-estimated-appointment-time" | "create-appointment-select-task-for"; title: string; optionValue: string; optionLabel: string; };
 
 const suspendResumeStartToolName = "start-suspend-resume-chat";
 const suspendResumeResumeToolName = "resume-suspend-resume-chat";
@@ -166,6 +142,7 @@ const supportedAttachmentTypes = {
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 } as const;
 const attachmentInputAccept = Object.keys(supportedAttachmentTypes).join(",");
+const preparedAppointmentAttachments = new Map<string, File>();
 
 function fileExtension(filename: string): string {
   const extensionStart = filename.lastIndexOf(".");
@@ -322,8 +299,13 @@ function parseAppointmentWarehouseOptions(value: unknown): AppointmentWarehouseO
     const id = optionalNonBlankString(option.id);
     const warehouseId = optionalNonBlankString(option.warehouseId);
     const name = optionalNonBlankString(option.name);
+    const source = option.source === undefined ? undefined : optionalNonBlankString(option.source);
+    const natureOfOperations = option.natureOfOperations === undefined ? undefined : optionalNonBlankString(option.natureOfOperations);
     const label = optionalNonBlankString(option.label);
-    return valueText && id && warehouseId && name && label ? { value: valueText, id, warehouseId, name, label } : null;
+    if (option.source !== undefined && !source || option.natureOfOperations !== undefined && !natureOfOperations) return null;
+    return valueText && id && warehouseId && name && label
+      ? { value: valueText, id, warehouseId, name, ...(source ? { source } : {}), ...(natureOfOperations ? { natureOfOperations } : {}), label }
+      : null;
   });
   return options.some((option) => option === null) ? null : options as AppointmentWarehouseOption[];
 }
@@ -341,6 +323,81 @@ function parseAppointmentAddOnProductOptions(value: unknown): AppointmentAddOnPr
   return options.some((option) => option === null) ? null : options as AppointmentAddOnProductOption[];
 }
 
+function parseAppointmentDeliveryLocationOptions(value: unknown): AppointmentDeliveryLocationOption[] | null {
+  if (!Array.isArray(value) || value.length > maxAppointmentWarehouseOptions) return null;
+  const options = value.map((option) => {
+    if (!isRecord(option)) return null;
+    const valueText = optionalNonBlankString(option.value);
+    const name = optionalNonBlankString(option.name);
+    const label = optionalNonBlankString(option.label);
+    return valueText && name && label ? { value: valueText, name, label } : null;
+  });
+  return options.some((option) => option === null) ? null : options as AppointmentDeliveryLocationOption[];
+}
+
+function parseAppointmentTypeOption(value: unknown): AppointmentTypeOption | null {
+  return isRecord(value) && (value.value === "跨境" || value.value === "本土") && value.name === value.value && value.label === value.value
+    ? { value: value.value, name: value.value, label: value.value }
+    : null;
+}
+
+function parseAppointmentTypeOptions(value: unknown): AppointmentTypeOption[] | null {
+  if (!Array.isArray(value) || value.length !== 2) return null;
+  const options = value.map(parseAppointmentTypeOption);
+  return options.some((option) => option === null) ? null : options as AppointmentTypeOption[];
+}
+
+function parseAppointmentTaskForOptions(value: unknown): AppointmentTaskForOption[] | null {
+  if (!Array.isArray(value) || value.length > maxAppointmentWarehouseOptions) return null;
+  const options = value.map((option) => {
+    if (!isRecord(option)) return null;
+    const valueText = optionalNonBlankString(option.value);
+    const id = optionalNonBlankString(option.id);
+    const globalUserCode = optionalNonBlankString(option.globalUserCode);
+    const name = optionalNonBlankString(option.name);
+    const label = optionalNonBlankString(option.label);
+    return valueText && id && globalUserCode && name && label ? { value: valueText, id, globalUserCode, name, label } : null;
+  });
+  return options.some((option) => option === null) ? null : options as AppointmentTaskForOption[];
+}
+
+function parseAppointmentOutboundTemplate(value: unknown): AppointmentOutboundTemplate | null {
+  if (!isRecord(value) || value.code !== "save_outbound_template") return null;
+  const url = optionalNonBlankString(value.url);
+  if (!url) return null;
+  try {
+    const parsedUrl = new URL(url);
+    return parsedUrl.protocol === "https:" && parsedUrl.origin === "https://portmax-v2-prod.oss-cn-hangzhou.aliyuncs.com"
+      ? { code: "save_outbound_template", url: parsedUrl.toString() }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatEstimatedAppointmentTime(value: string): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!match) return null;
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText = "00"] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const date = new Date(year, month - 1, day, hour, minute, second);
+  if (year < 1
+    || date.getFullYear() !== year
+    || date.getMonth() !== month - 1
+    || date.getDate() !== day
+    || date.getHours() !== hour
+    || date.getMinutes() !== minute
+    || date.getSeconds() !== second) return null;
+
+  return `${yearText}-${monthText}-${dayText} ${hourText}:${minuteText}:${secondText}`;
+}
+
 function parseAppointmentSelectionInteraction(value: unknown): AppointmentSelectionInteraction | null {
   const record = parseJsonObject(value);
   if (!isRecord(record) || record.kind !== "appointment-selection-v1" || !isUuid(record.runId)) return null;
@@ -350,8 +407,52 @@ function parseAppointmentSelectionInteraction(value: unknown): AppointmentSelect
 
   if (record.status === "suspended") {
     const prompt = optionalNonBlankString(record.prompt);
-    if (!prompt
-      || typeof record.total !== "number"
+    if (!prompt) return null;
+
+    if (record.stepId === "create-appointment-select-estimated-appointment-time") {
+      const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
+      const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
+      const deliveryLocations = parseAppointmentDeliveryLocationOptions([record.deliveryLocation]);
+      const appointmentType = parseAppointmentTypeOption(record.appointmentType);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !deliveryLocations || deliveryLocations.length !== 1 || !appointmentType) return null;
+      return {
+        kind: "appointment-selection-v1",
+        status: "suspended",
+        runId: record.runId,
+        stepId: "create-appointment-select-estimated-appointment-time",
+        title,
+        warehouse: warehouseOptions[0],
+        addOnProduct: addOnProducts[0],
+        deliveryLocation: deliveryLocations[0],
+        appointmentType,
+        prompt,
+      };
+    }
+
+    if (record.stepId === "create-appointment-prepare-attachment") {
+      const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
+      const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
+      const deliveryLocations = parseAppointmentDeliveryLocationOptions([record.deliveryLocation]);
+      const appointmentType = parseAppointmentTypeOption(record.appointmentType);
+      const estimatedAppointmentTime = optionalNonBlankString(record.estimatedAppointmentTime);
+      const taskForOptions = parseAppointmentTaskForOptions([record.taskFor]);
+      const template = parseAppointmentOutboundTemplate(record.template);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !deliveryLocations || deliveryLocations.length !== 1 || !appointmentType || !estimatedAppointmentTime || !taskForOptions || taskForOptions.length !== 1 || !template) return null;
+      return { kind: "appointment-selection-v1", status: "suspended", runId: record.runId, stepId: "create-appointment-prepare-attachment", title, warehouse: warehouseOptions[0], addOnProduct: addOnProducts[0], deliveryLocation: deliveryLocations[0], appointmentType, estimatedAppointmentTime, taskFor: taskForOptions[0], template, prompt };
+    }
+
+    if (record.stepId === "create-appointment-select-task-for") {
+      const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
+      const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
+      const deliveryLocations = parseAppointmentDeliveryLocationOptions([record.deliveryLocation]);
+      const appointmentType = parseAppointmentTypeOption(record.appointmentType);
+      const estimatedAppointmentTime = optionalNonBlankString(record.estimatedAppointmentTime);
+      const options = parseAppointmentTaskForOptions(record.options);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !deliveryLocations || deliveryLocations.length !== 1 || !appointmentType || !estimatedAppointmentTime || !options || typeof record.total !== "number" || !Number.isSafeInteger(record.total) || record.total < 0 || typeof record.truncated !== "boolean") return null;
+      return { kind: "appointment-selection-v1", status: "suspended", runId: record.runId, stepId: "create-appointment-select-task-for", title, warehouse: warehouseOptions[0], addOnProduct: addOnProducts[0], deliveryLocation: deliveryLocations[0], appointmentType, estimatedAppointmentTime, prompt, total: record.total, truncated: record.truncated, options };
+    }
+
+    if (typeof record.total !== "number"
       || !Number.isSafeInteger(record.total)
       || record.total < 0
       || typeof record.truncated !== "boolean") return null;
@@ -390,24 +491,34 @@ function parseAppointmentSelectionInteraction(value: unknown): AppointmentSelect
       };
     }
 
-    return null;
-  }
+    if (record.stepId === "create-appointment-select-delivery-location") {
+      const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
+      const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
+      const options = parseAppointmentDeliveryLocationOptions(record.options);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !options) return null;
+      return {
+        kind: "appointment-selection-v1",
+        status: "suspended",
+        runId: record.runId,
+        stepId: "create-appointment-select-delivery-location",
+        title,
+        warehouse: warehouseOptions[0],
+        addOnProduct: addOnProducts[0],
+        prompt,
+        total: record.total,
+        truncated: record.truncated,
+        options,
+      };
+    }
 
-  if (record.status === "completed") {
-    const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]);
-    const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
-    const message = optionalNonBlankString(record.message);
-    if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !message || record.completedSteps !== 3) return null;
-    return {
-      kind: "appointment-selection-v1",
-      status: "completed",
-      runId: record.runId,
-      title,
-      warehouse: warehouseOptions[0],
-      addOnProduct: addOnProducts[0],
-      message,
-      completedSteps: 3,
-    };
+    if (record.stepId === "create-appointment-select-appointment-type") {
+      const warehouseOptions = parseAppointmentWarehouseOptions([record.warehouse]); const addOnProducts = parseAppointmentAddOnProductOptions([record.addOnProduct]);
+      const deliveryLocations = parseAppointmentDeliveryLocationOptions([record.deliveryLocation]); const options = parseAppointmentTypeOptions(record.options);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !deliveryLocations || deliveryLocations.length !== 1 || !options) return null;
+      return { kind: "appointment-selection-v1", status: "suspended", runId: record.runId, stepId: "create-appointment-select-appointment-type", title, warehouse: warehouseOptions[0], addOnProduct: addOnProducts[0], deliveryLocation: deliveryLocations[0], prompt, total: record.total, truncated: record.truncated, options };
+    }
+
+    return null;
   }
 
   return null;
@@ -421,7 +532,7 @@ function parseAppointmentSelection(text: string): AppointmentSelection | null {
   const title = optionalNonBlankString(value.title);
   const optionValue = optionalNonBlankString(value.optionValue);
   const optionLabel = optionalNonBlankString(value.optionLabel);
-  if (!title || !optionValue || !optionLabel || (value.stepId !== "create-appointment-select-warehouse-name" && value.stepId !== "create-appointment-select-add-on-product")) return null;
+  if (!title || !optionValue || !optionLabel || (value.stepId !== "create-appointment-select-warehouse-name" && value.stepId !== "create-appointment-select-add-on-product" && value.stepId !== "create-appointment-select-delivery-location" && value.stepId !== "create-appointment-select-appointment-type" && value.stepId !== "create-appointment-select-estimated-appointment-time" && value.stepId !== "create-appointment-select-task-for")) return null;
   return { sourceMessageId: value.sourceMessageId, runId: value.runId, stepId: value.stepId, title, optionValue, optionLabel };
 }
 
@@ -566,7 +677,7 @@ function SuspendResumeChatInteractionPart({
   );
 }
 
-function AppointmentSelectionInteractionPart({
+function EstimatedAppointmentTimeSelection({
   disabled,
   interaction,
   onSelect,
@@ -574,19 +685,259 @@ function AppointmentSelectionInteractionPart({
   sourceMessageId,
 }: {
   disabled: boolean;
-  interaction: AppointmentSelectionInteraction;
-  onSelect: (sourceMessageId: string, interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>, option: AppointmentWarehouseOption | AppointmentAddOnProductOption) => void;
+  interaction: Extract<AppointmentSuspendedInteraction, { stepId: "create-appointment-select-estimated-appointment-time" }>;
+  onSelect: (sourceMessageId: string, interaction: AppointmentSuspendedInteraction, option: AppointmentSelectableOption) => void;
   selectedOptionKeys: ReadonlySet<string>;
   sourceMessageId: string;
 }): React.JSX.Element {
-  if (interaction.status === "completed") {
-    return <p className="warehouse-options__summary">{interaction.message}</p>;
+  const [inputValue, setInputValue] = useState("");
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const formattedTime = formatEstimatedAppointmentTime(inputValue);
+  const selectionKey = formattedTime
+    ? appointmentSelectionKey(sourceMessageId, interaction.runId, interaction.stepId, formattedTime)
+    : null;
+  const selected = selectionKey ? selectedOptionKeys.has(selectionKey) : false;
+
+  function submitEstimatedAppointmentTime(): void {
+    if (!formattedTime) {
+      setValidationError("请输入有效的预约日期和时间。");
+      return;
+    }
+    setValidationError(null);
+    onSelect(sourceMessageId, interaction, { value: formattedTime, label: formattedTime });
+  }
+
+  return (
+    <div className="warehouse-options">
+      <p className="warehouse-options__summary">{interaction.prompt}</p>
+      <p className="warehouse-options__summary">已选择仓库：{interaction.warehouse.label}</p>
+      <p className="warehouse-options__summary">已选择附加产品：{interaction.addOnProduct.label}</p>
+      <p className="warehouse-options__summary">已选择送仓地点：{interaction.deliveryLocation.label}</p>
+      <p className="warehouse-options__summary">已选择预约类型：{interaction.appointmentType.label}</p>
+      <label className="warehouse-options__summary">
+        预计预约时间
+        <input
+          aria-describedby={validationError ? "estimated-appointment-time-error" : undefined}
+          aria-invalid={validationError ? true : undefined}
+          disabled={disabled || selected}
+          onChange={(event) => {
+            setInputValue(event.target.value);
+            setValidationError(null);
+          }}
+          step="1"
+          type="datetime-local"
+          value={inputValue}
+        />
+      </label>
+      {validationError ? <p className="warehouse-options__empty" id="estimated-appointment-time-error">{validationError}</p> : null}
+      <button
+        className={`warehouse-options__option ${selected ? "warehouse-options__option--selected" : ""}`}
+        disabled={disabled || selected || !inputValue}
+        onClick={submitEstimatedAppointmentTime}
+        type="button"
+      >
+        <span>{selected ? "已确认" : "确认预计预约时间"}</span>
+      </button>
+    </div>
+  );
+}
+
+function AttachmentPreparationSelection({
+  disabled,
+  interaction,
+  onAppointmentCreated,
+}: {
+  disabled: boolean;
+  interaction: AppointmentSaveInteraction;
+  onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
+}): React.JSX.Element {
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedAttachment, setSelectedAttachment] = useState<File | null>(() => preparedAppointmentAttachments.get(interaction.runId) ?? null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [downloadState, setDownloadState] = useState<"idle" | "downloading" | "saved" | "failed">("idle");
+  const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
+
+  async function downloadTemplate(): Promise<void> {
+    if (disabled || downloadState === "downloading") return;
+    setDownloadState("downloading");
+    setDownloadMessage(null);
+    try {
+      const result = await window.api.appointment.downloadOutboundTemplate(interaction.template.url);
+      if (result.status === "saved") {
+        setDownloadState("saved");
+        setDownloadMessage(`模板已保存为 ${result.filename}。`);
+      } else if (result.status === "cancelled") {
+        setDownloadState("idle");
+        setDownloadMessage("已取消保存模板。");
+      } else {
+        setDownloadState("failed");
+        setDownloadMessage(result.message);
+      }
+    } catch {
+      setDownloadState("failed");
+      setDownloadMessage("无法下载或保存模板，请重试。");
+    }
+  }
+
+  function selectAttachment(event: ChangeEvent<HTMLInputElement>): void {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    const extension = fileExtension(file.name);
+    if (extension !== ".xlsx" && extension !== ".xls") {
+      preparedAppointmentAttachments.delete(interaction.runId);
+      setSelectedAttachment(null);
+      setAttachmentError("请仅选择已填写的 Excel 模板（.xlsx 或 .xls）。");
+      return;
+    }
+    if (file.size === 0 || file.size > maxAttachmentSizeBytes) {
+      preparedAppointmentAttachments.delete(interaction.runId);
+      setSelectedAttachment(null);
+      setAttachmentError(`附件必须非空且不超过 ${formatFileSize(maxAttachmentSizeBytes)}。`);
+      return;
+    }
+    setSelectedAttachment(file);
+    preparedAppointmentAttachments.set(interaction.runId, file);
+    setAttachmentError(null);
+  }
+
+  return (
+    <div className="warehouse-options">
+      <p className="warehouse-options__summary">{interaction.prompt}</p>
+      <p className="warehouse-options__summary">Task For：{interaction.taskFor.label}</p>
+      <button className="warehouse-options__option" disabled={disabled || downloadState === "downloading"} onClick={() => void downloadTemplate()} type="button">
+        <span>{downloadState === "downloading" ? "正在下载模板…" : "下载出库附件模板"}</span>
+      </button>
+      {downloadMessage ? <p className={downloadState === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{downloadMessage}</p> : null}
+      <input accept=".xlsx,.xls" className="attachment-file-input" disabled={disabled} onChange={selectAttachment} ref={attachmentInputRef} tabIndex={-1} type="file" />
+      <button className="warehouse-options__option" disabled={disabled} onClick={() => attachmentInputRef.current?.click()} type="button">
+        <span>{selectedAttachment ? "重新选择附件" : "选择要在 Save 上传的附件"}</span>
+      </button>
+      {selectedAttachment ? <p className="warehouse-options__summary">已选择附件：{selectedAttachment.name}（{formatFileSize(selectedAttachment.size)}）</p> : null}
+      {attachmentError ? <p className="warehouse-options__empty">{attachmentError}</p> : null}
+      <p className="warehouse-options__summary">选择附件后，直接点击下方 Save 才会正式创建预约单；不会生成下一步或自动提交。</p>
+      <OutboundAppointmentSave disabled={disabled} interaction={interaction} onAppointmentCreated={onAppointmentCreated} />
+    </div>
+  );
+}
+
+function OutboundAppointmentSave({
+  disabled,
+  interaction,
+  onAppointmentCreated,
+}: {
+  disabled: boolean;
+  interaction: AppointmentSaveInteraction;
+  onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
+}): React.JSX.Element {
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [message, setMessage] = useState<string | null>(null);
+  const attachment = preparedAppointmentAttachments.get(interaction.runId);
+
+  async function save(): Promise<void> {
+    if (disabled || state === "saving" || state === "saved") return;
+    if (!attachment) {
+      setState("failed");
+      setMessage("附件不可用；请重新选择附件或重新开始预约流程。");
+      return;
+    }
+    if (!window.confirm("确认保存并正式创建预约单吗？该操作会将已选择的 Excel 附件提交到 Portmax。")) return;
+
+    setState("saving");
+    setMessage(null);
+    try {
+      const result = await window.api.appointment.saveOutboundSchedule({
+        file: {
+          name: attachment.name,
+          type: attachment.type,
+          bytes: await attachment.arrayBuffer(),
+        },
+        warehouseName: interaction.warehouse.name,
+        source: interaction.warehouse.source || interaction.warehouse.natureOfOperations || "",
+        serviceNo: interaction.addOnProduct.code,
+        deliveryLocation: interaction.deliveryLocation.value,
+        type: interaction.appointmentType.value,
+        estimatedAppointmentTime: interaction.estimatedAppointmentTime,
+        remark: "",
+        globalUserId: interaction.taskFor.globalUserCode,
+      });
+      if (result.success) {
+        preparedAppointmentAttachments.delete(interaction.runId);
+        setState("saved");
+        setMessage(result.message);
+        onAppointmentCreated(interaction, result.message);
+      } else {
+        setState("failed");
+        setMessage(result.message);
+      }
+    } catch {
+      setState("failed");
+      setMessage("保存请求未得到确认结果。请先在 Portmax 查询是否已创建；不要自动重试。");
+    }
+  }
+
+  return (
+    <div className="warehouse-options">
+      <p className="warehouse-options__summary">附件与预约草稿已准备完成。</p>
+      <p className="warehouse-options__summary">预计预约时间：{interaction.estimatedAppointmentTime}</p>
+      <p className="warehouse-options__summary">Task For：{interaction.taskFor.label}</p>
+      {attachment ? <p className="warehouse-options__summary">待上传附件：{attachment.name}（{formatFileSize(attachment.size)}）</p> : <p className="warehouse-options__empty">附件不可用；请重新选择附件或重新开始预约流程。</p>}
+      <p className="warehouse-options__summary">点击 Save 后才会正式创建预约单；不会自动提交或自动重试。</p>
+      <button
+        className={`warehouse-options__option ${state === "saved" ? "warehouse-options__option--selected" : ""}`}
+        disabled={disabled || !attachment || state === "saving" || state === "saved"}
+        onClick={() => void save()}
+        type="button"
+      >
+        <span>{state === "saving" ? "正在保存…" : state === "saved" ? "已保存" : "Save 并正式创建预约单"}</span>
+      </button>
+      {message ? <p className={state === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{message}</p> : null}
+    </div>
+  );
+}
+
+function AppointmentSelectionInteractionPart({
+  disabled,
+  interaction,
+  onAppointmentCreated,
+  onSelect,
+  selectedOptionKeys,
+  sourceMessageId,
+}: {
+  disabled: boolean;
+  interaction: AppointmentSelectionInteraction;
+  onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
+  onSelect: (sourceMessageId: string, interaction: AppointmentSuspendedInteraction, option: AppointmentSelectableOption) => void;
+  selectedOptionKeys: ReadonlySet<string>;
+  sourceMessageId: string;
+}): React.JSX.Element {
+  if (interaction.stepId === "create-appointment-prepare-attachment") {
+    return <AttachmentPreparationSelection disabled={disabled} interaction={interaction} onAppointmentCreated={onAppointmentCreated} />;
+  }
+
+  if (interaction.stepId === "create-appointment-select-estimated-appointment-time") {
+    return <EstimatedAppointmentTimeSelection disabled={disabled} interaction={interaction} onSelect={onSelect} selectedOptionKeys={selectedOptionKeys} sourceMessageId={sourceMessageId} />;
   }
 
   return (
     <div className="warehouse-options">
       <p className="warehouse-options__summary">{interaction.prompt}</p>
       {interaction.stepId === "create-appointment-select-add-on-product" ? <p className="warehouse-options__summary">已选择仓库：{interaction.warehouse.label}</p> : null}
+      {interaction.stepId === "create-appointment-select-delivery-location" ? (
+        <>
+          <p className="warehouse-options__summary">已选择仓库：{interaction.warehouse.label}</p>
+          <p className="warehouse-options__summary">已选择附加产品：{interaction.addOnProduct.label}</p>
+        </>
+      ) : null}
+      {interaction.stepId === "create-appointment-select-task-for" ? (
+        <>
+          <p className="warehouse-options__summary">已选择仓库：{interaction.warehouse.label}</p>
+          <p className="warehouse-options__summary">已选择附加产品：{interaction.addOnProduct.label}</p>
+          <p className="warehouse-options__summary">已选择 Delivery Location：{interaction.deliveryLocation.label}</p>
+          <p className="warehouse-options__summary">已选择预约类型：{interaction.appointmentType.label}</p>
+          <p className="warehouse-options__summary">已选择预计预约时间：{interaction.estimatedAppointmentTime}</p>
+        </>
+      ) : null}
       {interaction.options.length > 0 ? (
         <div className="warehouse-options__list">
           {interaction.options.map((option) => {
@@ -616,6 +967,7 @@ function AppointmentSelectionInteractionPart({
 function ToolCallPart({
   disabledAppointmentSelection,
   disabledSuspendResumeSelection,
+  onAppointmentCreated,
   onAppointmentSelect,
   onSuspendResumeSelect,
   part,
@@ -625,7 +977,8 @@ function ToolCallPart({
 }: {
   disabledAppointmentSelection: boolean;
   disabledSuspendResumeSelection: boolean;
-  onAppointmentSelect: (sourceMessageId: string, interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>, option: AppointmentWarehouseOption | AppointmentAddOnProductOption) => void;
+  onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
+  onAppointmentSelect: (sourceMessageId: string, interaction: AppointmentSuspendedInteraction, option: AppointmentSelectableOption) => void;
   onSuspendResumeSelect: (sourceMessageId: string, interaction: Extract<SuspendResumeChatInteraction, { status: "suspended" }>, option: SuspendResumeChatOption) => void;
   part: MessagePart;
   selectedAppointmentOptionKeys: ReadonlySet<string>;
@@ -686,6 +1039,7 @@ function ToolCallPart({
               <AppointmentSelectionInteractionPart
                 disabled={disabledAppointmentSelection}
                 interaction={appointmentInteraction}
+                onAppointmentCreated={onAppointmentCreated}
                 onSelect={onAppointmentSelect}
                 selectedOptionKeys={selectedAppointmentOptionKeys}
                 sourceMessageId={sourceMessageId}
@@ -726,6 +1080,7 @@ function MessagePartView({
   disabledSuspendResumeSelection,
   isStreaming,
   messageRole,
+  onAppointmentCreated,
   onAppointmentSelect,
   onSuspendResumeSelect,
   part,
@@ -737,7 +1092,8 @@ function MessagePartView({
   disabledSuspendResumeSelection: boolean;
   isStreaming: boolean;
   messageRole: UIMessage["role"];
-  onAppointmentSelect: (sourceMessageId: string, interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>, option: AppointmentWarehouseOption | AppointmentAddOnProductOption) => void;
+  onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
+  onAppointmentSelect: (sourceMessageId: string, interaction: AppointmentSuspendedInteraction, option: AppointmentSelectableOption) => void;
   onSuspendResumeSelect: (sourceMessageId: string, interaction: Extract<SuspendResumeChatInteraction, { status: "suspended" }>, option: SuspendResumeChatOption) => void;
   part: MessagePart;
   selectedAppointmentOptionKeys: ReadonlySet<string>;
@@ -777,6 +1133,7 @@ function MessagePartView({
       <ToolCallPart
         disabledAppointmentSelection={disabledAppointmentSelection}
         disabledSuspendResumeSelection={disabledSuspendResumeSelection}
+        onAppointmentCreated={onAppointmentCreated}
         onAppointmentSelect={onAppointmentSelect}
         onSuspendResumeSelect={onSuspendResumeSelect}
         part={part}
@@ -911,6 +1268,29 @@ function ConversationPanel({
   const canSend = Boolean(mcpSessionInput && serviceEndpoints && chatProxyUrl) && !isSending;
   const selectedSuspendResumeKeys = useMemo(() => selectedSuspendResumeOptionKeys(messages), [messages]);
   const selectedAppointmentKeys = useMemo(() => selectedAppointmentOptionKeys(messages), [messages]);
+  const handleAppointmentCreated = useCallback((interaction: AppointmentSaveInteraction, upstreamMessage: string): void => {
+    shouldAutoScrollRef.current = true;
+    const completionMessage: UIMessage = {
+      id: globalThis.crypto?.randomUUID?.() ?? `appointment-created-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      role: "assistant",
+      parts: [{
+        type: "text",
+        text: [
+          "预约单创建完成 ✅",
+          "",
+          `仓库：${interaction.warehouse.label}`,
+          `Add-on Product：${interaction.addOnProduct.label}`,
+          `Delivery Location：${interaction.deliveryLocation.label}`,
+          `预约单类型：${interaction.appointmentType.label}`,
+          `Estimated Appointment Time：${interaction.estimatedAppointmentTime}`,
+          `Task For：${interaction.taskFor.label}`,
+          "",
+          upstreamMessage || "Portmax 已确认接收预约单。",
+        ].join("\n"),
+      }],
+    };
+    setMessages((current) => [...current, completionMessage]);
+  }, [setMessages]);
   const scrollToBottom = useCallback((): void => {
     const container = scrollContainerRef.current;
     if (container) container.scrollTop = container.scrollHeight;
@@ -1005,9 +1385,10 @@ function ConversationPanel({
 
   function handleAppointmentSelect(
     sourceMessageId: string,
-    interaction: Extract<AppointmentSelectionInteraction, { status: "suspended" }>,
-    option: AppointmentWarehouseOption | AppointmentAddOnProductOption,
+    interaction: AppointmentSuspendedInteraction,
+    option: AppointmentSelectableOption,
   ): void {
+    if (interaction.stepId === "create-appointment-prepare-attachment") return;
     const selectionKey = appointmentSelectionKey(sourceMessageId, interaction.runId, interaction.stepId, option.value);
     if (!canSend || selectedAppointmentKeys.has(selectionKey) || pendingAppointmentSelectionKeysRef.current.has(selectionKey)) return;
 
@@ -1119,6 +1500,7 @@ function ConversationPanel({
                           isStreaming={isStreamingMessage}
                           key={`${part.type}-${index}`}
                           messageRole={message.role}
+                          onAppointmentCreated={handleAppointmentCreated}
                           onAppointmentSelect={handleAppointmentSelect}
                           onSuspendResumeSelect={handleSuspendResumeSelect}
                           part={part}

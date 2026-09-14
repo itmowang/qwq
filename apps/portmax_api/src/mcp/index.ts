@@ -38,6 +38,7 @@ const warehouseSettingsSchema = {
 };
 
 const addOnProductSchema = {};
+const taskForUsersByFlowSchema = {};
 
 function getOutboundScheduleCredentials(sessionCredentials: McpSessionCredentials | undefined): McpSessionCredentials {
   const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH?.trim();
@@ -78,7 +79,7 @@ export function createMcpTransport(options: McpTransportOptions = {}) {
         const credentials = getDictionaryCredentials();
         const query = new URLSearchParams({ code });
         const upstreamResponse = await forwardUpstream({
-          path: `/blade-system/dict/dictionary?${query.toString()}`,
+          path: `/api/blade-system/dict/dictionary?${query.toString()}`,
           method: "GET",
           headers: {
             accept: "application/json, text/plain, */*",
@@ -107,6 +108,65 @@ export function createMcpTransport(options: McpTransportOptions = {}) {
       } catch (error) {
         return {
           content: [{ type: "text", text: error instanceof Error ? error.message : "字典查询失败。" }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  const getTaskForUsersCredentials = (): McpSessionCredentials => {
+    const sessionCredentials = options.getSessionCredentials?.();
+    const bladeAuth = sessionCredentials?.bladeAuth.trim();
+
+    if (!bladeAuth) {
+      throw new Error(
+        "发起 Task For 查询前必须在当前 MCP 请求中提供 X-Portmax-Blade-Auth。",
+      );
+    }
+
+    return { bladeAuth, tenantId: sessionCredentials?.tenantId };
+  };
+
+  server.registerTool(
+    "get_task_for_users_by_flow",
+    {
+      title: "查询预约单 Task For 用户",
+      description: "查询 flow code 60 可选择的 Task For 用户；请求路径、方法和 flow code 均已固定。",
+      inputSchema: taskForUsersByFlowSchema,
+    },
+    async () => {
+      try {
+        const credentials = getTaskForUsersCredentials();
+        const upstreamResponse = await forwardUpstream({
+          path: "/api/blade-flow/work/queryUserByFlow?code=60",
+          method: "GET",
+          headers: {
+            accept: "application/json, text/plain, */*",
+            "blade-auth": credentials.bladeAuth,
+            "blade-requested-with": "BladeHttpRequest",
+            ...(credentials.tenantId ? { "tenant-id": credentials.tenantId } : {}),
+          },
+          // 任务人查询只转发当前 MCP session 的 Blade-Auth，不允许静态凭据回退。
+          authorization: "",
+        });
+        const text = await upstreamResponse.text();
+        const summary = JSON.stringify(
+          {
+            status: upstreamResponse.status,
+            contentType: upstreamResponse.headers.get("content-type"),
+            body: text,
+          },
+          null,
+          2,
+        );
+
+        return {
+          content: [{ type: "text", text: summary }],
+          isError: !upstreamResponse.ok,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : "Task For 查询失败。" }],
           isError: true,
         };
       }

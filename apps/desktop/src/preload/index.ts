@@ -5,6 +5,9 @@ import type {
   LoginInput,
   LoginResult,
   McpSessionInput,
+  OutboundAppointmentSaveInput,
+  OutboundAppointmentSaveResult,
+  OutboundTemplateDownloadResult,
   ServiceEndpoints,
 } from "../shared/auth";
 
@@ -18,6 +21,10 @@ const api: DesktopApi = {
   server: {
     getEndpoints: (): Promise<ServiceEndpoints | null> => ipcRenderer.invoke("server:get-endpoints"),
     getChatProxyUrl: (): Promise<string | null> => ipcRenderer.invoke("server:get-chat-proxy-url"),
+  },
+  appointment: {
+    downloadOutboundTemplate: (url: string): Promise<OutboundTemplateDownloadResult> => ipcRenderer.invoke("appointment:download-outbound-template", url),
+    saveOutboundSchedule: (input: OutboundAppointmentSaveInput): Promise<OutboundAppointmentSaveResult> => ipcRenderer.invoke("appointment:save-outbound-schedule", input),
   },
 };
 

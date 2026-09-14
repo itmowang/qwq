@@ -36,6 +36,32 @@ export type LoginResult =
       message: string;
     };
 
+export type OutboundTemplateDownloadResult =
+  | { status: "saved"; filename: string }
+  | { status: "cancelled" }
+  | { status: "failed"; message: string };
+
+/** The only non-secret payload the renderer may send to explicitly save a completed appointment. */
+export type OutboundAppointmentSaveInput = {
+  file: {
+    name: string;
+    type: string;
+    bytes: ArrayBuffer;
+  };
+  warehouseName: string;
+  source: string;
+  serviceNo: string;
+  deliveryLocation: string;
+  type: "跨境" | "本土";
+  estimatedAppointmentTime: string;
+  remark: string;
+  globalUserId: string;
+};
+
+export type OutboundAppointmentSaveResult =
+  | { success: true; message: string }
+  | { success: false; message: string; status?: number };
+
 export type DesktopApi = {
   auth: {
     login: (input: LoginInput) => Promise<LoginResult>;
@@ -46,5 +72,9 @@ export type DesktopApi = {
   server: {
     getEndpoints: () => Promise<ServiceEndpoints | null>;
     getChatProxyUrl: () => Promise<string | null>;
+  };
+  appointment: {
+    downloadOutboundTemplate: (url: string) => Promise<OutboundTemplateDownloadResult>;
+    saveOutboundSchedule: (input: OutboundAppointmentSaveInput) => Promise<OutboundAppointmentSaveResult>;
   };
 };

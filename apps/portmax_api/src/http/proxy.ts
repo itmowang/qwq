@@ -12,6 +12,7 @@ export type ProxyRequest = {
   method: string;
   headers?: Record<string, string>;
   body?: BodyInit | null;
+  signal?: AbortSignal;
   /** A route-specific authorization value that takes precedence over the default upstream credential. */
   authorization?: string;
 };
@@ -87,5 +88,6 @@ export async function forwardUpstream(request: ProxyRequest): Promise<Response> 
     method: request.method.toUpperCase(),
     headers,
     body: request.body,
+    signal: request.signal,
   });
 }
