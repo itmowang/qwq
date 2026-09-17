@@ -27,27 +27,15 @@ export type ServiceEndpoints = {
 };
 
 export type LoginResult =
-  | {
-      success: true;
-      user: AuthenticatedUser;
-    }
-  | {
-      success: false;
-      message: string;
-    };
+  | { success: true; user: AuthenticatedUser }
+  | { success: false; message: string };
 
 export type OutboundTemplateDownloadResult =
   | { status: "saved"; filename: string }
   | { status: "cancelled" }
   | { status: "failed"; message: string };
 
-/** The only non-secret payload the renderer may send to explicitly save a completed appointment. */
-export type OutboundAppointmentSaveInput = {
-  file: {
-    name: string;
-    type: string;
-    bytes: ArrayBuffer;
-  };
+export type OutboundPlanSubmissionDraft = {
   warehouseName: string;
   source: string;
   serviceNo: string;
@@ -58,7 +46,23 @@ export type OutboundAppointmentSaveInput = {
   globalUserId: string;
 };
 
-export type OutboundAppointmentSaveResult =
+/** The Excel bytes are used only for the immediate parsing upload. */
+export type OutboundPlanUploadInput = {
+  file: { name: string; type: string; bytes: ArrayBuffer };
+  warehouseName: string;
+};
+
+export type OutboundPlanUploadResult =
+  | { success: true; message: string; boxList: unknown[]; exceptionData: string }
+  | { success: false; message: string; status?: number };
+
+/** Creation deliberately contains no file and is always JSON-serialized by the main process. */
+export type OutboundPlanCreateInput = OutboundPlanSubmissionDraft & {
+  boxList: unknown[];
+  exceptionData: string;
+};
+
+export type OutboundPlanCreateResult =
   | { success: true; message: string }
   | { success: false; message: string; status?: number };
 
@@ -75,6 +79,7 @@ export type DesktopApi = {
   };
   appointment: {
     downloadOutboundTemplate: (url: string) => Promise<OutboundTemplateDownloadResult>;
-    saveOutboundSchedule: (input: OutboundAppointmentSaveInput) => Promise<OutboundAppointmentSaveResult>;
+    uploadOutboundPlan: (input: OutboundPlanUploadInput) => Promise<OutboundPlanUploadResult>;
+    createOutboundPlan: (input: OutboundPlanCreateInput) => Promise<OutboundPlanCreateResult>;
   };
 };

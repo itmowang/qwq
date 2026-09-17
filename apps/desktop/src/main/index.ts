@@ -10,8 +10,10 @@ import type {
   AuthenticatedUser,
   LoginInput,
   LoginResult,
-  OutboundAppointmentSaveInput,
-  OutboundAppointmentSaveResult,
+  OutboundPlanCreateInput,
+  OutboundPlanCreateResult,
+  OutboundPlanUploadInput,
+  OutboundPlanUploadResult,
   OutboundTemplateDownloadResult,
   ServiceEndpoints,
 } from "../shared/auth";
@@ -495,46 +497,37 @@ function validEstimatedAppointmentTime(value: string): boolean {
     && parsed.getUTCSeconds() === second;
 }
 
-function parseOutboundAppointmentSaveInput(value: unknown): OutboundAppointmentSaveInput | null {
-  if (!isRecord(value)) return null;
-  const expectedKeys = new Set([
-    "file", "warehouseName", "source", "serviceNo", "deliveryLocation",
-    "type", "estimatedAppointmentTime", "remark", "globalUserId",
-  ]);
-  if (Object.keys(value).length !== expectedKeys.size || Object.keys(value).some((key) => !expectedKeys.has(key))) return null;
-  if (!isRecord(value.file)) return null;
-
+function parseOutboundPlanUploadInput(value: unknown): OutboundPlanUploadInput | null {
+  if (!isRecord(value) || Object.keys(value).length !== 2 || !("file" in value) || !("warehouseName" in value) || !isRecord(value.file)) return null;
   const name = boundedString(value.file.name, 1, 255);
   const type = typeof value.file.type === "string" ? value.file.type.toLowerCase() : null;
   const bytes = value.file.bytes;
   const warehouseName = boundedString(value.warehouseName, 1, 240);
+  if (!name || /[\\/\u0000-\u001f]/.test(name) || !/\.(xlsx|xls)$/i.test(name) || type === null || !allowedOutboundAppointmentFileTypes.has(type) || !(bytes instanceof ArrayBuffer) || bytes.byteLength === 0 || bytes.byteLength > maxOutboundAppointmentAttachmentBytes || !warehouseName) return null;
+  return { file: { name, type, bytes }, warehouseName };
+}
+
+function validParsedPlanData(value: unknown): value is { boxList: unknown[]; exceptionData?: string } {
+  return isRecord(value)
+    && Array.isArray(value.boxList)
+    && value.boxList.length <= 10_000
+    && (value.exceptionData === undefined || (typeof value.exceptionData === "string" && value.exceptionData.length <= 4 * 1024 * 1024));
+}
+
+function parseOutboundPlanCreateInput(value: unknown): OutboundPlanCreateInput | null {
+  if (!isRecord(value)) return null;
+  const keys = ["warehouseName", "source", "serviceNo", "deliveryLocation", "type", "estimatedAppointmentTime", "remark", "globalUserId", "boxList", "exceptionData"];
+  if (Object.keys(value).length !== keys.length || keys.some((key) => !(key in value))) return null;
+  const warehouseName = boundedString(value.warehouseName, 1, 240);
   const source = boundedString(value.source, 0, 240);
   const serviceNo = boundedString(value.serviceNo, 1, 120);
   const deliveryLocation = boundedString(value.deliveryLocation, 1, 120);
+  const estimatedAppointmentTime = boundedString(value.estimatedAppointmentTime, 19, 19);
   const remark = boundedString(value.remark, 0, 1_000);
   const globalUserId = boundedString(value.globalUserId, 1, 120);
-  const estimatedAppointmentTime = boundedString(value.estimatedAppointmentTime, 19, 19);
-
-  if (!name || /[\\/\u0000-\u001f]/.test(name) || !/\.(xlsx|xls)$/i.test(name)
-    || type === null || !allowedOutboundAppointmentFileTypes.has(type)
-    || !(bytes instanceof ArrayBuffer) || bytes.byteLength === 0 || bytes.byteLength > maxOutboundAppointmentAttachmentBytes
-    || !warehouseName || source === null || !serviceNo || !deliveryLocation || remark === null || !globalUserId
-    || (value.type !== "跨境" && value.type !== "本土")
-    || !estimatedAppointmentTime || !validEstimatedAppointmentTime(estimatedAppointmentTime)) {
-    return null;
-  }
-
-  return {
-    file: { name, type, bytes },
-    warehouseName,
-    source,
-    serviceNo,
-    deliveryLocation,
-    type: value.type,
-    estimatedAppointmentTime,
-    remark,
-    globalUserId,
-  };
+  const appointmentType = value.type;
+  if (!warehouseName || source === null || !serviceNo || !deliveryLocation || !estimatedAppointmentTime || !validEstimatedAppointmentTime(estimatedAppointmentTime) || remark === null || !globalUserId || (appointmentType !== "跨境" && appointmentType !== "本土") || !validParsedPlanData(value)) return null;
+  return { warehouseName, source, serviceNo, deliveryLocation, type: appointmentType, estimatedAppointmentTime, remark, globalUserId, boxList: value.boxList, exceptionData: value.exceptionData ?? "" };
 }
 
 function saveResponseMessage(payload: unknown, fallback: string): string {
@@ -546,69 +539,54 @@ function saveResponseMessage(payload: unknown, fallback: string): string {
   return fallback;
 }
 
-async function saveOutboundAppointment(rawInput: unknown): Promise<OutboundAppointmentSaveResult> {
-  const input = parseOutboundAppointmentSaveInput(rawInput);
-  if (!input) return { success: false, message: "预约保存数据无效。请重新选择附件并从当前预约流程继续。" };
+function isBusinessFailure(payload: unknown): boolean {
+  return isRecord(payload) && (payload.success === false || (typeof payload.code === "number" && payload.code >= 400));
+}
 
+async function outboundPlanRequest(path: "/outbound-schedule/upload" | "/outbound-schedule/create", body: BodyInit, headers: HeadersInit): Promise<{ response: Response; payload: unknown }> {
   const session = await readValidPersistedSession();
-  if (!session) return { success: false, message: "登录会话已失效，请重新登录后再保存。" };
-
-  let endpoint: URL;
-  try {
-    endpoint = new URL("/outbound-schedule/save", serviceEndpoints.portmaxApiUrl);
-  } catch {
-    return { success: false, message: "本地预约保存服务地址无效。" };
-  }
-
-  const form = new FormData();
-  form.set("file", new Blob([input.file.bytes], { type: input.file.type }), input.file.name);
-  form.set("warehouseName", input.warehouseName);
-  form.set("source", input.source);
-  form.set("serviceNo", input.serviceNo);
-  form.set("deliveryLocation", input.deliveryLocation);
-  form.set("type", input.type);
-  form.set("estimatedAppointmentTime", input.estimatedAppointmentTime);
-  form.set("remark", input.remark);
-  form.set("globalUserId", input.globalUserId);
-
+  if (!session) throw new Error("SESSION_EXPIRED");
+  const endpoint = new URL(path, serviceEndpoints.portmaxApiUrl);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        accept: "application/json, text/plain, */*",
-        "x-portmax-blade-auth": session.accessToken,
-        "x-portmax-tenant-id": session.user.tenantId,
-      },
-      body: form,
-      redirect: "error",
-      signal: controller.signal,
-    });
+    const response = await fetch(endpoint, { method: "POST", headers: { accept: "application/json, text/plain, */*", "x-portmax-blade-auth": session.accessToken, "x-portmax-tenant-id": session.user.tenantId, ...headers }, body, redirect: "error", signal: controller.signal });
     const text = await response.text();
     let payload: unknown = null;
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      // A successful upstream save may return a plain-text acknowledgement.
-    }
-    const isBusinessFailure = isRecord(payload)
-      && (payload.success === false || (typeof payload.code === "number" && payload.code >= 400));
-    if (!response.ok || isBusinessFailure) {
-      return {
-        success: false,
-        status: response.status,
-        message: saveResponseMessage(payload, `预约保存失败（HTTP ${response.status}）。`),
-      };
-    }
+    try { payload = text ? JSON.parse(text) : null; } catch { /* create may acknowledge with plain text */ }
+    return { response, payload };
+  } finally { clearTimeout(timeout); }
+}
+
+async function uploadOutboundPlan(rawInput: unknown): Promise<OutboundPlanUploadResult> {
+  const input = parseOutboundPlanUploadInput(rawInput);
+  if (!input) return { success: false, message: "上传解析数据无效。请选择当前流程中的 Excel 附件。" };
+  const form = new FormData();
+  form.set("file", new Blob([input.file.bytes], { type: input.file.type }), input.file.name);
+  form.set("warehouseName", input.warehouseName);
+  try {
+    const { response, payload } = await outboundPlanRequest("/outbound-schedule/upload", form, {});
+    const data = isRecord(payload) ? payload.data : null;
+    if (!response.ok || isBusinessFailure(payload) || !validParsedPlanData(data)) return { success: false, status: response.status, message: saveResponseMessage(payload, "附件上传解析失败，未获得有效的 boxList 和 exceptionData。") };
+    return { success: true, message: saveResponseMessage(payload, "附件已上传并解析完成。"), boxList: data.boxList, exceptionData: data.exceptionData ?? "" };
+  } catch (error) {
+    if (error instanceof Error && error.message === "SESSION_EXPIRED") return { success: false, message: "登录会话已失效，请重新登录后再上传解析。" };
+    if (error instanceof Error && error.name === "AbortError") return { success: false, message: "上传解析请求超时，结果未确认。请勿自动重试；可重新选择文件后手动上传。" };
+    return { success: false, message: "上传解析请求未得到确认结果。请勿自动重试；可重新选择文件后手动上传。" };
+  }
+}
+
+async function createOutboundPlan(rawInput: unknown): Promise<OutboundPlanCreateResult> {
+  const input = parseOutboundPlanCreateInput(rawInput);
+  if (!input) return { success: false, message: "预约创建数据无效。请从当前流程重新上传并解析附件。" };
+  try {
+    const { response, payload } = await outboundPlanRequest("/outbound-schedule/create", JSON.stringify(input), { "content-type": "application/json" });
+    if (!response.ok || isBusinessFailure(payload)) return { success: false, status: response.status, message: saveResponseMessage(payload, `预约保存失败（HTTP ${response.status}）。`) };
     return { success: true, message: saveResponseMessage(payload, "预约单已提交并获得上游确认。") };
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      return { success: false, message: "保存请求超时，结果未确认。请先在 Portmax 查询是否已创建；不要自动重试。" };
-    }
+    if (error instanceof Error && error.message === "SESSION_EXPIRED") return { success: false, message: "登录会话已失效，请重新登录后再保存。" };
+    if (error instanceof Error && error.name === "AbortError") return { success: false, message: "保存请求超时，结果未确认。请先在 Portmax 查询是否已创建；不要自动重试。" };
     return { success: false, message: "保存请求未得到确认结果。请先在 Portmax 查询是否已创建；不要自动重试。" };
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -687,11 +665,14 @@ function createWindow(): void {
     return downloadOutboundTemplate(mainWindow, rawUrl);
   });
 
-  ipcMain.handle("appointment:save-outbound-schedule", async (event, input: unknown) => {
-    if (event.sender !== mainWindow.webContents) {
-      return { success: false, message: "无法验证预约保存请求来源。" } satisfies OutboundAppointmentSaveResult;
-    }
-    return saveOutboundAppointment(input);
+  ipcMain.handle("appointment:upload-outbound-plan", async (event, input: unknown) => {
+    if (event.sender !== mainWindow.webContents) return { success: false, message: "无法验证附件上传请求来源。" } satisfies OutboundPlanUploadResult;
+    return uploadOutboundPlan(input);
+  });
+
+  ipcMain.handle("appointment:create-outbound-plan", async (event, input: unknown) => {
+    if (event.sender !== mainWindow.webContents) return { success: false, message: "无法验证预约创建请求来源。" } satisfies OutboundPlanCreateResult;
+    return createOutboundPlan(input);
   });
 
   ipcMain.handle("auth:logout", async (event) => {
@@ -706,7 +687,8 @@ function createWindow(): void {
     ipcMain.removeHandler("server:get-endpoints");
     ipcMain.removeHandler("server:get-chat-proxy-url");
     ipcMain.removeHandler("appointment:download-outbound-template");
-    ipcMain.removeHandler("appointment:save-outbound-schedule");
+    ipcMain.removeHandler("appointment:upload-outbound-plan");
+    ipcMain.removeHandler("appointment:create-outbound-plan");
     ipcMain.removeHandler("auth:logout");
   });
 

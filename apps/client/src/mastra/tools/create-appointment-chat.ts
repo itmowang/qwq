@@ -47,8 +47,18 @@ const deliveryLocationOptionSchema = z.object({
   value: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(240), label: z.string().trim().min(1).max(400),
 });
 const appointmentTypeOptionSchema = z.object({ value: z.enum(["跨境", "本土"]), name: z.enum(["跨境", "本土"]), label: z.enum(["跨境", "本土"]) });
-const taskForOptionSchema = z.object({ value: z.string().trim().min(1).max(120), id: z.string().trim().min(1).max(120), globalUserCode: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(240), label: z.string().trim().min(1).max(400) });
+const taskForOptionSchema = z.object({ value: z.string().trim().min(1).max(120), id: z.string().trim().min(1).max(120), globalUserId: z.string().trim().min(1).max(120), globalUserCode: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(240), label: z.string().trim().min(1).max(400) });
 const outboundTemplateSchema = z.object({ code: z.literal("save_outbound_template"), url: z.string().url().max(2_000) });
+const submissionDraftSchema = z.object({
+  warehouseName: z.string().trim().min(1).max(240),
+  source: z.string().trim().max(240),
+  serviceNo: z.string().trim().min(1).max(120),
+  deliveryLocation: z.string().trim().min(1).max(120),
+  type: z.enum(["跨境", "本土"]),
+  estimatedAppointmentTime: z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/),
+  remark: z.string().trim().max(1_000),
+  globalUserId: z.string().trim().min(1).max(120),
+});
 const estimatedAppointmentTimeSchema = z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 const warehouseSuspendedInteractionSchema = z.object({
   kind: z.literal("appointment-selection-v1"),
@@ -94,7 +104,7 @@ const appointmentTypeSuspendedInteractionSchema = z.object({
 });
 const estimatedAppointmentTimeSuspendedInteractionSchema = z.object({ kind: z.literal("appointment-selection-v1"), status: z.literal("suspended"), runId: z.string().uuid(), stepId: z.literal(estimatedAppointmentTimeSelectionStepId), title: requestSchema, warehouse: warehouseOptionSchema, addOnProduct: addOnProductOptionSchema, deliveryLocation: deliveryLocationOptionSchema, appointmentType: appointmentTypeOptionSchema, prompt: z.string().min(1) });
 const taskForSuspendedInteractionSchema = z.object({ kind: z.literal("appointment-selection-v1"), status: z.literal("suspended"), runId: z.string().uuid(), stepId: z.literal(appointmentTaskForSelectionStepId), title: requestSchema, warehouse: warehouseOptionSchema, addOnProduct: addOnProductOptionSchema, deliveryLocation: deliveryLocationOptionSchema, appointmentType: appointmentTypeOptionSchema, estimatedAppointmentTime: estimatedAppointmentTimeSchema, prompt: z.string().min(1), total: z.number().int().nonnegative(), truncated: z.boolean(), options: z.array(taskForOptionSchema).max(100) });
-const outboundTemplatePreparationSuspendedInteractionSchema = z.object({ kind: z.literal("appointment-selection-v1"), status: z.literal("suspended"), runId: z.string().uuid(), stepId: z.literal(outboundTemplatePreparationStepId), title: requestSchema, warehouse: warehouseOptionSchema, addOnProduct: addOnProductOptionSchema, deliveryLocation: deliveryLocationOptionSchema, appointmentType: appointmentTypeOptionSchema, estimatedAppointmentTime: estimatedAppointmentTimeSchema, taskFor: taskForOptionSchema, template: outboundTemplateSchema, prompt: z.string().min(1) });
+const outboundTemplatePreparationSuspendedInteractionSchema = z.object({ kind: z.literal("appointment-selection-v1"), status: z.literal("suspended"), runId: z.string().uuid(), stepId: z.literal(outboundTemplatePreparationStepId), title: requestSchema, warehouse: warehouseOptionSchema, addOnProduct: addOnProductOptionSchema, deliveryLocation: deliveryLocationOptionSchema, appointmentType: appointmentTypeOptionSchema, estimatedAppointmentTime: estimatedAppointmentTimeSchema, taskFor: taskForOptionSchema, template: outboundTemplateSchema, submissionDraft: submissionDraftSchema, prompt: z.string().min(1) });
 const interactionOutputSchema = z.union([
   warehouseSuspendedInteractionSchema,
   addOnProductSuspendedInteractionSchema,
@@ -121,7 +131,7 @@ async function suspendedInteraction(runId: string) {
   };
 
   const outboundTemplate = outboundTemplatePreparationPayloadSchema.safeParse(readPayload(outboundTemplatePreparationStepId));
-  if (outboundTemplate.success) return { kind: "appointment-selection-v1" as const, status: "suspended" as const, runId, stepId: outboundTemplatePreparationStepId as typeof outboundTemplatePreparationStepId, title: outboundTemplate.data.request, warehouse: outboundTemplate.data.warehouse, addOnProduct: outboundTemplate.data.addOnProduct, deliveryLocation: outboundTemplate.data.deliveryLocation, appointmentType: outboundTemplate.data.appointmentType, estimatedAppointmentTime: outboundTemplate.data.estimatedAppointmentTime, taskFor: outboundTemplate.data.taskFor, template: outboundTemplate.data.template, prompt: outboundTemplate.data.prompt };
+  if (outboundTemplate.success) return { kind: "appointment-selection-v1" as const, status: "suspended" as const, runId, stepId: outboundTemplatePreparationStepId as typeof outboundTemplatePreparationStepId, title: outboundTemplate.data.request, warehouse: outboundTemplate.data.warehouse, addOnProduct: outboundTemplate.data.addOnProduct, deliveryLocation: outboundTemplate.data.deliveryLocation, appointmentType: outboundTemplate.data.appointmentType, estimatedAppointmentTime: outboundTemplate.data.estimatedAppointmentTime, taskFor: outboundTemplate.data.taskFor, template: outboundTemplate.data.template, submissionDraft: outboundTemplate.data.submissionDraft, prompt: outboundTemplate.data.prompt };
 
   const taskFor = appointmentTaskForSelectionPayloadSchema.safeParse(readPayload(appointmentTaskForSelectionStepId));
   if (taskFor.success) return { kind: "appointment-selection-v1" as const, status: "suspended" as const, runId, stepId: appointmentTaskForSelectionStepId as typeof appointmentTaskForSelectionStepId, title: taskFor.data.request, warehouse: taskFor.data.warehouse, addOnProduct: taskFor.data.addOnProduct, deliveryLocation: taskFor.data.deliveryLocation, appointmentType: taskFor.data.appointmentType, estimatedAppointmentTime: taskFor.data.estimatedAppointmentTime, prompt: taskFor.data.prompt, total: taskFor.data.total, truncated: taskFor.data.truncated, options: taskFor.data.options };
@@ -268,6 +278,6 @@ export const resumeCreateAppointmentChatTool = createTool({
       throw new Error(workflowFailureMessage(result, "创建预约单 workflow 恢复后未能进入附件模板准备步骤。"));
     }
 
-    throw new Error("附件准备在桌面卡片中本地完成；请选择 Excel 文件后直接点击 Save，不要恢复 workflow。");
+    throw new Error("附件准备在桌面卡片中本地完成；请选择 Excel 后会立即上传解析，确认 Save 时才以 JSON 创建预约单，不要恢复 workflow。");
   },
 });

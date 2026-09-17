@@ -1,5 +1,5 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { portmaxTools } from "../../mcp/client.js";
+import { mcpClient, portmaxTools } from "../../mcp/client.js";
 import { z } from "zod";
 
 const maxWarehouseOptions = 100 as const;
@@ -76,7 +76,8 @@ export const appointmentTypeOptionSchema = z.object({
 export const appointmentTaskForOptionSchema = z.object({
   value: z.string().trim().min(1).max(120).describe("任务人的稳定 ID，仅用于恢复本次选择。"),
   id: z.string().trim().min(1).max(120).describe("Portmax 任务人 ID。"),
-  globalUserCode: z.string().trim().min(1).max(120).describe("Portmax 全局用户编码，用于正式保存预约单。"),
+  globalUserId: z.string().trim().min(1).max(120).describe("创建出库计划时提交的全局用户 ID。"),
+  globalUserCode: z.string().trim().min(1).max(120).describe("Portmax 返回的全局用户编码；兼容旧上游字段。"),
   name: z.string().trim().min(1).max(240).describe("任务人显示名称。"),
   label: z.string().trim().min(1).max(400).describe("展示给用户选择的任务人。"),
 });
@@ -84,6 +85,18 @@ export const appointmentTaskForOptionSchema = z.object({
 export const outboundTemplateSchema = z.object({
   code: z.literal("save_outbound_template"),
   url: z.string().url().max(2_000).describe("字典中配置的出库附件模板下载地址。"),
+});
+
+/** 桌面端在用户选择 Excel 后上传、并在最终确认时创建出库计划的固定草稿。 */
+export const outboundPlanSubmissionDraftSchema = z.object({
+  warehouseName: z.string().trim().min(1).max(240),
+  source: z.string().trim().max(240),
+  serviceNo: z.string().trim().min(1).max(120),
+  deliveryLocation: z.string().trim().min(1).max(120),
+  type: z.enum(["跨境", "本土"]),
+  estimatedAppointmentTime: estimatedAppointmentTimeSchema,
+  remark: z.string().trim().max(1_000),
+  globalUserId: z.string().trim().min(1).max(120),
 });
 
 const appointmentTypeOptions = [
@@ -132,6 +145,7 @@ export const appointmentTaskForSelectionPayloadSchema = estimatedAppointmentTime
 const taskForSelectionOutputSchema = estimatedAppointmentTimeSelectionOutputSchema.extend({ taskFor: appointmentTaskForOptionSchema });
 export const outboundTemplatePreparationPayloadSchema = taskForSelectionOutputSchema.extend({
   template: outboundTemplateSchema,
+  submissionDraft: outboundPlanSubmissionDraftSchema,
   prompt: z.string().min(1),
 });
 const outputSchema = taskForSelectionOutputSchema;
@@ -145,6 +159,27 @@ const mcpToolResultSchema = z.object({
   content: z.array(z.object({ type: z.string(), text: z.string().optional() })),
   isError: z.boolean().optional(),
 });
+
+type PortmaxToolExecute = (input: Record<string, unknown>, options: unknown) => Promise<unknown>;
+
+/**
+ * Mastra starts with a discovered tool snapshot. If Portmax MCP was upgraded after
+ * 4111 started, refresh once before failing instead of requiring a second restart.
+ */
+async function requirePortmaxTool(toolName: string, subject: string): Promise<PortmaxToolExecute> {
+  const execute = (portmaxTools as Record<string, { execute?: unknown }>)[toolName]?.execute;
+  if (typeof execute === "function") return execute as PortmaxToolExecute;
+
+  try {
+    const refreshedTools = await mcpClient.listTools();
+    const refreshedExecute = (refreshedTools as Record<string, { execute?: unknown }>)[toolName]?.execute;
+    if (typeof refreshedExecute === "function") return refreshedExecute as PortmaxToolExecute;
+  } catch {
+    // Preserve the actionable lifecycle error below; the upstream tool list may be unavailable during a restart.
+  }
+
+  throw new Error(`portmax_api 未提供可执行的${subject}工具。请先重启 portmax_api（3001），再重启 Mastra client（4111）。`);
+}
 
 const warehouseSettingSchema = z.object({
   id: z.string().trim().min(1).max(120),
@@ -325,12 +360,14 @@ function getTaskForOptions(value: unknown): z.infer<typeof appointmentTaskForOpt
   };
   const options = parsedEntries.data.map((entry) => {
     const id = field(entry, ["id", "userId", "user_id"]);
-    const globalUserCode = field(entry, ["globalUserCode"]);
+    // 新版创建接口使用 globalUserId；旧上游仍可能只返回 globalUserCode，因此保留并映射该兼容字段。
+    const globalUserId = field(entry, ["globalUserId", "globalUserCode"]);
+    const globalUserCode = field(entry, ["globalUserCode", "globalUserId"]);
     const name = field(entry, ["realName", "real_name", "name", "userName", "user_name", "account", "nickName", "nick_name"]);
-    if (!id || !globalUserCode || !name) {
-      throw new Error("Task For 接口包含无法安全映射的用户。必须返回 id/userId/user_id、globalUserCode 和显示名称；globalUserCode 不可用数字 ID 替代。");
+    if (!id || !globalUserId || !globalUserCode || !name) {
+      throw new Error("Task For 接口包含无法安全映射的用户。必须返回 id/userId/user_id、globalUserId 或 globalUserCode 和显示名称。");
     }
-    return { value: id, id, globalUserCode, name, label: name === id ? name : `${name}（${id}）` };
+    return { value: id, id, globalUserId, globalUserCode, name, label: name === id ? name : `${name}（${id}）` };
   });
   if (new Set(options.map((option) => option.value)).size !== options.length) {
     throw new Error("Task For 接口包含重复的稳定用户 ID。");
@@ -436,10 +473,7 @@ export const selectAppointmentWarehouseNameStep = createStep({
       throw new Error("当前 Workflow 运行没有 Portmax 登录会话。请从已登录的桌面聊天入口调用 Agent；不要在请求中粘贴 Blade-Auth。");
     }
 
-    const executeWarehouseTool = portmaxTools.portmax_get_warehouse_settings?.execute;
-    if (!executeWarehouseTool) {
-      throw new Error("portmax_api 未提供可执行的仓库设置查询工具。请确认 MCP 服务已更新并重启客户端。");
-    }
+    const executeWarehouseTool = await requirePortmaxTool("portmax_get_warehouse_settings", "仓库设置查询");
 
     const result = await executeWarehouseTool({ warehouseName: "" }, { requestContext } as never);
     const warehouseSettings = getWarehouseSettings(parseMcpResponse(result, "仓库设置"));
@@ -492,10 +526,7 @@ export const selectAppointmentAddOnProductStep = createStep({
       throw new Error("当前 Workflow 运行没有 Portmax 登录会话。请从已登录的桌面聊天入口调用 Agent；不要在请求中粘贴 Blade-Auth。");
     }
 
-    const executeAddOnProductTool = portmaxTools.portmax_get_add_on_products?.execute;
-    if (!executeAddOnProductTool) {
-      throw new Error("portmax_api 未提供可执行的 Add-on Product 查询工具。请确认 MCP 服务已更新并重启客户端。");
-    }
+    const executeAddOnProductTool = await requirePortmaxTool("portmax_get_add_on_products", "Add-on Product 查询");
 
     const result = await executeAddOnProductTool({}, { requestContext } as never);
     const productMap = getAddOnProductMap(parseMcpResponse(result, "附加产品"));
@@ -545,10 +576,7 @@ export const selectAppointmentDeliveryLocationStep = createStep({
       throw new Error("当前 Workflow 运行没有 Portmax 登录会话。请从已登录的桌面聊天入口调用 Agent；不要在请求中粘贴 Blade-Auth。");
     }
 
-    const executeDictionaryTool = portmaxTools.portmax_search_dict?.execute;
-    if (!executeDictionaryTool) {
-      throw new Error("portmax_api 未提供可执行的字典查询工具。请确认 MCP 服务已更新并重启客户端。");
-    }
+    const executeDictionaryTool = await requirePortmaxTool("portmax_search_dict", "字典查询");
 
     const result = await executeDictionaryTool(
       { code: "Appointment_Delivery_Location" },
@@ -635,10 +663,7 @@ export const selectAppointmentTaskForStep = createStep({
       throw new Error("当前 Workflow 运行没有 Portmax 登录会话。请从已登录的桌面聊天入口调用 Agent；不要在请求中粘贴 Blade-Auth。");
     }
 
-    const executeTaskForTool = portmaxTools.portmax_get_task_for_users_by_flow?.execute;
-    if (!executeTaskForTool) {
-      throw new Error("portmax_api 未提供可执行的 Task For 查询工具。请确认 MCP 服务已更新并重启客户端。");
-    }
+    const executeTaskForTool = await requirePortmaxTool("portmax_get_task_for_users_by_flow", "Task For 查询");
 
     const result = await executeTaskForTool({}, { requestContext } as never);
     const allOptions = getTaskForOptions(parseMcpResponse(result, "Task For"));
@@ -674,17 +699,27 @@ export const prepareAppointmentAttachmentStep = createStep({
     if (!bladeAuth) {
       throw new Error("当前 Workflow 运行没有 Portmax 登录会话。请从已登录的桌面聊天入口调用 Agent；不要在请求中粘贴 Blade-Auth。");
     }
-    const executeDictionaryTool = portmaxTools.portmax_search_dict?.execute;
-    if (!executeDictionaryTool) {
-      throw new Error("portmax_api 未提供可执行的字典查询工具。请确认 MCP 服务已更新并重启客户端。");
-    }
+    const executeDictionaryTool = await requirePortmaxTool("portmax_search_dict", "字典查询");
 
     const result = await executeDictionaryTool({ code: "template_download_url" }, { requestContext } as never);
     const template = getOutboundTemplate(parseMcpResponse(result, "出库模板字典"));
+    const submissionDraft = {
+      warehouseName: inputData.warehouse.name,
+      source: inputData.warehouse.source ?? inputData.warehouse.natureOfOperations ?? "",
+      serviceNo: inputData.addOnProduct.code,
+      // React 表单提交的是字典 dictKey，而非展示文案。
+      deliveryLocation: inputData.deliveryLocation.value,
+      type: inputData.appointmentType.value,
+      estimatedAppointmentTime: inputData.estimatedAppointmentTime,
+      // 备注由最终 Save 卡片编辑；此处提供与 API 相同的默认值。
+      remark: "",
+      globalUserId: inputData.taskFor.globalUserId,
+    };
     return suspend({
       ...inputData,
       template,
-      prompt: "请下载并填写出库附件模板，然后选择已填写的 Excel 文件并点击 Save 正式创建预约单。此处不会生成下一步或自动提交。",
+      submissionDraft,
+      prompt: "请下载并填写出库附件模板，然后选择已填写的 Excel 文件。选定文件后桌面端会立即调用 outboundPlanUpload 解析并取得 boxList 和 exceptionData；exceptionData 会显示为警告但不阻止创建。随后只有在你明确确认 Save 时，桌面端才会使用 submissionDraft、boxList 与 exceptionData 通过 JSON 创建出库计划；不会重新上传、自动提交或自动重试。",
     });
   },
 });

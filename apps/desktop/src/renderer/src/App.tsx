@@ -101,7 +101,8 @@ type AppointmentAddOnProductOption = {
 };
 type AppointmentDeliveryLocationOption = { value: string; name: string; label: string; };
 type AppointmentTypeOption = { value: "跨境" | "本土"; name: "跨境" | "本土"; label: "跨境" | "本土"; };
-type AppointmentTaskForOption = { value: string; id: string; globalUserCode: string; name: string; label: string; };
+type AppointmentTaskForOption = { value: string; id: string; globalUserId?: string; globalUserCode?: string; name: string; label: string; };
+type OutboundPlanSubmissionDraft = { warehouseName: string; source: string; serviceNo: string; deliveryLocation: string; type: "跨境" | "本土"; estimatedAppointmentTime: string; remark: string; globalUserId: string; };
 type AppointmentOutboundTemplate = { code: "save_outbound_template"; url: string; };
 type AppointmentSelectableOption = AppointmentWarehouseOption | AppointmentAddOnProductOption | AppointmentDeliveryLocationOption | AppointmentTypeOption | AppointmentTaskForOption | { value: string; label: string; };
 type AppointmentSelectionInteraction =
@@ -111,7 +112,7 @@ type AppointmentSelectionInteraction =
   | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-appointment-type"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; prompt: string; total: number; truncated: boolean; options: AppointmentTypeOption[]; }
   | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-estimated-appointment-time"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; prompt: string; }
   | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-select-task-for"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; estimatedAppointmentTime: string; prompt: string; total: number; truncated: boolean; options: AppointmentTaskForOption[]; }
-  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-prepare-attachment"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; estimatedAppointmentTime: string; taskFor: AppointmentTaskForOption; template: AppointmentOutboundTemplate; prompt: string; };
+  | { kind: "appointment-selection-v1"; status: "suspended"; runId: string; stepId: "create-appointment-prepare-attachment"; title: string; warehouse: AppointmentWarehouseOption; addOnProduct: AppointmentAddOnProductOption; deliveryLocation: AppointmentDeliveryLocationOption; appointmentType: AppointmentTypeOption; estimatedAppointmentTime: string; taskFor: AppointmentTaskForOption; template: AppointmentOutboundTemplate; submissionDraft: OutboundPlanSubmissionDraft; prompt: string; };
 type AppointmentSuspendedInteraction = AppointmentSelectionInteraction;
 type AppointmentSaveInteraction = Extract<AppointmentSuspendedInteraction, { stepId: "create-appointment-prepare-attachment" }>;
 type AppointmentSelection = { sourceMessageId: string; runId: string; stepId: "create-appointment-select-warehouse-name" | "create-appointment-select-add-on-product" | "create-appointment-select-delivery-location" | "create-appointment-select-appointment-type" | "create-appointment-select-estimated-appointment-time" | "create-appointment-select-task-for"; title: string; optionValue: string; optionLabel: string; };
@@ -142,7 +143,6 @@ const supportedAttachmentTypes = {
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 } as const;
 const attachmentInputAccept = Object.keys(supportedAttachmentTypes).join(",");
-const preparedAppointmentAttachments = new Map<string, File>();
 
 function fileExtension(filename: string): string {
   const extensionStart = filename.lastIndexOf(".");
@@ -353,10 +353,12 @@ function parseAppointmentTaskForOptions(value: unknown): AppointmentTaskForOptio
     if (!isRecord(option)) return null;
     const valueText = optionalNonBlankString(option.value);
     const id = optionalNonBlankString(option.id);
-    const globalUserCode = optionalNonBlankString(option.globalUserCode);
+    const globalUserId = option.globalUserId === undefined ? undefined : optionalNonBlankString(option.globalUserId);
+    const globalUserCode = option.globalUserCode === undefined ? undefined : optionalNonBlankString(option.globalUserCode);
     const name = optionalNonBlankString(option.name);
     const label = optionalNonBlankString(option.label);
-    return valueText && id && globalUserCode && name && label ? { value: valueText, id, globalUserCode, name, label } : null;
+    if ((option.globalUserId !== undefined && !globalUserId) || (option.globalUserCode !== undefined && !globalUserCode)) return null;
+    return valueText && id && name && label && (globalUserId || globalUserCode) ? { value: valueText, id, ...(globalUserId ? { globalUserId } : {}), ...(globalUserCode ? { globalUserCode } : {}), name, label } : null;
   });
   return options.some((option) => option === null) ? null : options as AppointmentTaskForOption[];
 }
@@ -373,6 +375,25 @@ function parseAppointmentOutboundTemplate(value: unknown): AppointmentOutboundTe
   } catch {
     return null;
   }
+}
+
+function parseOutboundPlanSubmissionDraft(value: unknown): OutboundPlanSubmissionDraft | null {
+  if (!isRecord(value)) return null;
+  const keys = ["warehouseName", "source", "serviceNo", "deliveryLocation", "type", "estimatedAppointmentTime", "remark", "globalUserId"];
+  if (Object.keys(value).length !== keys.length || keys.some((key) => !(key in value))) return null;
+  const field = (key: string, minimum: number, maximum: number): string | null => {
+    const item = value[key];
+    return typeof item === "string" && item.trim().length >= minimum && item.trim().length <= maximum ? item.trim() : null;
+  };
+  const warehouseName = field("warehouseName", 1, 240);
+  const source = field("source", 0, 240);
+  const serviceNo = field("serviceNo", 1, 120);
+  const deliveryLocation = field("deliveryLocation", 1, 120);
+  const estimatedAppointmentTime = field("estimatedAppointmentTime", 19, 19);
+  const remark = field("remark", 0, 1_000);
+  const globalUserId = field("globalUserId", 1, 120);
+  if (!warehouseName || source === null || !serviceNo || !deliveryLocation || !estimatedAppointmentTime || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(estimatedAppointmentTime) || remark === null || !globalUserId || (value.type !== "跨境" && value.type !== "本土")) return null;
+  return { warehouseName, source, serviceNo, deliveryLocation, type: value.type, estimatedAppointmentTime, remark, globalUserId };
 }
 
 function formatEstimatedAppointmentTime(value: string): string | null {
@@ -437,8 +458,9 @@ function parseAppointmentSelectionInteraction(value: unknown): AppointmentSelect
       const estimatedAppointmentTime = optionalNonBlankString(record.estimatedAppointmentTime);
       const taskForOptions = parseAppointmentTaskForOptions([record.taskFor]);
       const template = parseAppointmentOutboundTemplate(record.template);
-      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !deliveryLocations || deliveryLocations.length !== 1 || !appointmentType || !estimatedAppointmentTime || !taskForOptions || taskForOptions.length !== 1 || !template) return null;
-      return { kind: "appointment-selection-v1", status: "suspended", runId: record.runId, stepId: "create-appointment-prepare-attachment", title, warehouse: warehouseOptions[0], addOnProduct: addOnProducts[0], deliveryLocation: deliveryLocations[0], appointmentType, estimatedAppointmentTime, taskFor: taskForOptions[0], template, prompt };
+      const submissionDraft = parseOutboundPlanSubmissionDraft(record.submissionDraft);
+      if (!warehouseOptions || warehouseOptions.length !== 1 || !addOnProducts || addOnProducts.length !== 1 || !deliveryLocations || deliveryLocations.length !== 1 || !appointmentType || !estimatedAppointmentTime || !taskForOptions || taskForOptions.length !== 1 || !template || !submissionDraft) return null;
+      return { kind: "appointment-selection-v1", status: "suspended", runId: record.runId, stepId: "create-appointment-prepare-attachment", title, warehouse: warehouseOptions[0], addOnProduct: addOnProducts[0], deliveryLocation: deliveryLocations[0], appointmentType, estimatedAppointmentTime, taskFor: taskForOptions[0], template, submissionDraft, prompt };
     }
 
     if (record.stepId === "create-appointment-select-task-for") {
@@ -742,6 +764,8 @@ function EstimatedAppointmentTimeSelection({
   );
 }
 
+type UploadedOutboundPlan = { boxList: unknown[]; exceptionData: string };
+
 function AttachmentPreparationSelection({
   disabled,
   interaction,
@@ -752,148 +776,90 @@ function AttachmentPreparationSelection({
   onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
 }): React.JSX.Element {
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
-  const [selectedAttachment, setSelectedAttachment] = useState<File | null>(() => preparedAppointmentAttachments.get(interaction.runId) ?? null);
+  const [selectedAttachment, setSelectedAttachment] = useState<File | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [uploadState, setUploadState] = useState<"idle" | "uploading" | "uploaded" | "failed">("idle");
+  const [uploadedPlan, setUploadedPlan] = useState<UploadedOutboundPlan | null>(null);
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [downloadState, setDownloadState] = useState<"idle" | "downloading" | "saved" | "failed">("idle");
   const [downloadMessage, setDownloadMessage] = useState<string | null>(null);
 
   async function downloadTemplate(): Promise<void> {
     if (disabled || downloadState === "downloading") return;
-    setDownloadState("downloading");
-    setDownloadMessage(null);
+    setDownloadState("downloading"); setDownloadMessage(null);
     try {
       const result = await window.api.appointment.downloadOutboundTemplate(interaction.template.url);
-      if (result.status === "saved") {
-        setDownloadState("saved");
-        setDownloadMessage(`模板已保存为 ${result.filename}。`);
-      } else if (result.status === "cancelled") {
-        setDownloadState("idle");
-        setDownloadMessage("已取消保存模板。");
-      } else {
-        setDownloadState("failed");
-        setDownloadMessage(result.message);
-      }
-    } catch {
-      setDownloadState("failed");
-      setDownloadMessage("无法下载或保存模板，请重试。");
-    }
+      if (result.status === "saved") { setDownloadState("saved"); setDownloadMessage(`模板已保存为 ${result.filename}。`); }
+      else if (result.status === "cancelled") { setDownloadState("idle"); setDownloadMessage("已取消保存模板。"); }
+      else { setDownloadState("failed"); setDownloadMessage(result.message); }
+    } catch { setDownloadState("failed"); setDownloadMessage("无法下载或保存模板，请重试。"); }
   }
 
-  function selectAttachment(event: ChangeEvent<HTMLInputElement>): void {
-    const file = event.currentTarget.files?.[0];
-    event.currentTarget.value = "";
-    if (!file) return;
+  async function selectAttachment(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.currentTarget.files?.[0]; event.currentTarget.value = "";
+    if (!file || disabled || uploadState === "uploading") return;
     const extension = fileExtension(file.name);
-    if (extension !== ".xlsx" && extension !== ".xls") {
-      preparedAppointmentAttachments.delete(interaction.runId);
-      setSelectedAttachment(null);
-      setAttachmentError("请仅选择已填写的 Excel 模板（.xlsx 或 .xls）。");
+    if ((extension !== ".xlsx" && extension !== ".xls") || file.size === 0 || file.size > maxAttachmentSizeBytes) {
+      setSelectedAttachment(null); setUploadedPlan(null); setUploadState("failed");
+      setAttachmentError(extension !== ".xlsx" && extension !== ".xls" ? "请仅选择已填写的 Excel 模板（.xlsx 或 .xls）。" : `附件必须非空且不超过 ${formatFileSize(maxAttachmentSizeBytes)}。`);
       return;
     }
-    if (file.size === 0 || file.size > maxAttachmentSizeBytes) {
-      preparedAppointmentAttachments.delete(interaction.runId);
-      setSelectedAttachment(null);
-      setAttachmentError(`附件必须非空且不超过 ${formatFileSize(maxAttachmentSizeBytes)}。`);
-      return;
-    }
-    setSelectedAttachment(file);
-    preparedAppointmentAttachments.set(interaction.runId, file);
-    setAttachmentError(null);
+    setSelectedAttachment(file); setUploadedPlan(null); setAttachmentError(null); setUploadState("uploading"); setUploadMessage("正在上传并解析 Excel 附件…");
+    try {
+      const result = await window.api.appointment.uploadOutboundPlan({ file: { name: file.name, type: file.type, bytes: await file.arrayBuffer() }, warehouseName: interaction.submissionDraft.warehouseName });
+      if (result.success) {
+        setUploadedPlan({ boxList: result.boxList, exceptionData: result.exceptionData }); setUploadState("uploaded");
+        setUploadMessage(result.message || "附件已上传并解析完成。");
+      } else { setUploadState("failed"); setUploadMessage(result.message); }
+    } catch { setUploadState("failed"); setUploadMessage("上传解析请求未得到确认结果。请勿自动重试；可重新选择文件后手动上传。"); }
   }
 
-  return (
-    <div className="warehouse-options">
-      <p className="warehouse-options__summary">{interaction.prompt}</p>
-      <p className="warehouse-options__summary">Task For：{interaction.taskFor.label}</p>
-      <button className="warehouse-options__option" disabled={disabled || downloadState === "downloading"} onClick={() => void downloadTemplate()} type="button">
-        <span>{downloadState === "downloading" ? "正在下载模板…" : "下载出库附件模板"}</span>
-      </button>
-      {downloadMessage ? <p className={downloadState === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{downloadMessage}</p> : null}
-      <input accept=".xlsx,.xls" className="attachment-file-input" disabled={disabled} onChange={selectAttachment} ref={attachmentInputRef} tabIndex={-1} type="file" />
-      <button className="warehouse-options__option" disabled={disabled} onClick={() => attachmentInputRef.current?.click()} type="button">
-        <span>{selectedAttachment ? "重新选择附件" : "选择要在 Save 上传的附件"}</span>
-      </button>
-      {selectedAttachment ? <p className="warehouse-options__summary">已选择附件：{selectedAttachment.name}（{formatFileSize(selectedAttachment.size)}）</p> : null}
-      {attachmentError ? <p className="warehouse-options__empty">{attachmentError}</p> : null}
-      <p className="warehouse-options__summary">选择附件后，直接点击下方 Save 才会正式创建预约单；不会生成下一步或自动提交。</p>
-      <OutboundAppointmentSave disabled={disabled} interaction={interaction} onAppointmentCreated={onAppointmentCreated} />
-    </div>
-  );
+  return <div className="warehouse-options">
+    <p className="warehouse-options__summary">{interaction.prompt}</p>
+    <p className="warehouse-options__summary">Task For：{interaction.taskFor.label}</p>
+    <button className="warehouse-options__option" disabled={disabled || downloadState === "downloading"} onClick={() => void downloadTemplate()} type="button"><span>{downloadState === "downloading" ? "正在下载模板…" : "下载出库附件模板"}</span></button>
+    {downloadMessage ? <p className={downloadState === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{downloadMessage}</p> : null}
+    <input accept=".xlsx,.xls" className="attachment-file-input" disabled={disabled || uploadState === "uploading"} onChange={(event) => void selectAttachment(event)} ref={attachmentInputRef} tabIndex={-1} type="file" />
+    <button className="warehouse-options__option" disabled={disabled || uploadState === "uploading"} onClick={() => attachmentInputRef.current?.click()} type="button"><span>{uploadState === "uploading" ? "正在上传解析…" : selectedAttachment ? "重新选择并上传附件" : "选择并立即上传解析附件"}</span></button>
+    {selectedAttachment ? <p className="warehouse-options__summary">已选择附件：{selectedAttachment.name}（{formatFileSize(selectedAttachment.size)}）</p> : null}
+    {attachmentError ? <p className="warehouse-options__empty">{attachmentError}</p> : null}
+    {uploadMessage ? <p className={uploadState === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{uploadMessage}</p> : null}
+    {uploadedPlan ? <>
+      <p className="warehouse-options__summary">解析完成：boxList 共 {uploadedPlan.boxList.length} 条。</p>
+      {uploadedPlan.exceptionData ? <p className="warehouse-options__empty">警告：上传解析返回 exceptionData；这不是失败，核对后仍可点击 Save 创建。{uploadedPlan.exceptionData}</p> : null}
+    </> : <p className="warehouse-options__summary">选择有效 Excel 后会立即上传解析；解析中或解析失败时不可创建。</p>}
+    <OutboundAppointmentSave disabled={disabled} interaction={interaction} parsedPlan={uploadedPlan} uploadState={uploadState} onAppointmentCreated={onAppointmentCreated} />
+  </div>;
 }
 
 function OutboundAppointmentSave({
-  disabled,
-  interaction,
-  onAppointmentCreated,
+  disabled, interaction, parsedPlan, uploadState, onAppointmentCreated,
 }: {
   disabled: boolean;
   interaction: AppointmentSaveInteraction;
+  parsedPlan: UploadedOutboundPlan | null;
+  uploadState: "idle" | "uploading" | "uploaded" | "failed";
   onAppointmentCreated: (interaction: AppointmentSaveInteraction, message: string) => void;
 }): React.JSX.Element {
   const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const [message, setMessage] = useState<string | null>(null);
-  const attachment = preparedAppointmentAttachments.get(interaction.runId);
-
   async function save(): Promise<void> {
-    if (disabled || state === "saving" || state === "saved") return;
-    if (!attachment) {
-      setState("failed");
-      setMessage("附件不可用；请重新选择附件或重新开始预约流程。");
-      return;
-    }
-    if (!window.confirm("确认保存并正式创建预约单吗？该操作会将已选择的 Excel 附件提交到 Portmax。")) return;
-
-    setState("saving");
-    setMessage(null);
+    if (disabled || !parsedPlan || uploadState !== "uploaded" || state === "saving" || state === "saved") return;
+    if (!window.confirm("附件已完成解析。确认使用 JSON 正式创建预约单吗？此操作不会重新上传附件。")) return;
+    setState("saving"); setMessage(null);
     try {
-      const result = await window.api.appointment.saveOutboundSchedule({
-        file: {
-          name: attachment.name,
-          type: attachment.type,
-          bytes: await attachment.arrayBuffer(),
-        },
-        warehouseName: interaction.warehouse.name,
-        source: interaction.warehouse.source || interaction.warehouse.natureOfOperations || "",
-        serviceNo: interaction.addOnProduct.code,
-        deliveryLocation: interaction.deliveryLocation.value,
-        type: interaction.appointmentType.value,
-        estimatedAppointmentTime: interaction.estimatedAppointmentTime,
-        remark: "",
-        globalUserId: interaction.taskFor.globalUserCode,
-      });
-      if (result.success) {
-        preparedAppointmentAttachments.delete(interaction.runId);
-        setState("saved");
-        setMessage(result.message);
-        onAppointmentCreated(interaction, result.message);
-      } else {
-        setState("failed");
-        setMessage(result.message);
-      }
-    } catch {
-      setState("failed");
-      setMessage("保存请求未得到确认结果。请先在 Portmax 查询是否已创建；不要自动重试。");
-    }
+      const result = await window.api.appointment.createOutboundPlan({ ...interaction.submissionDraft, boxList: parsedPlan.boxList, exceptionData: parsedPlan.exceptionData });
+      if (result.success) { setState("saved"); setMessage(result.message); onAppointmentCreated(interaction, result.message); }
+      else { setState("failed"); setMessage(result.message); }
+    } catch { setState("failed"); setMessage("保存请求未得到确认结果。请先在 Portmax 查询是否已创建；不要自动重试。"); }
   }
-
-  return (
-    <div className="warehouse-options">
-      <p className="warehouse-options__summary">附件与预约草稿已准备完成。</p>
-      <p className="warehouse-options__summary">预计预约时间：{interaction.estimatedAppointmentTime}</p>
-      <p className="warehouse-options__summary">Task For：{interaction.taskFor.label}</p>
-      {attachment ? <p className="warehouse-options__summary">待上传附件：{attachment.name}（{formatFileSize(attachment.size)}）</p> : <p className="warehouse-options__empty">附件不可用；请重新选择附件或重新开始预约流程。</p>}
-      <p className="warehouse-options__summary">点击 Save 后才会正式创建预约单；不会自动提交或自动重试。</p>
-      <button
-        className={`warehouse-options__option ${state === "saved" ? "warehouse-options__option--selected" : ""}`}
-        disabled={disabled || !attachment || state === "saving" || state === "saved"}
-        onClick={() => void save()}
-        type="button"
-      >
-        <span>{state === "saving" ? "正在保存…" : state === "saved" ? "已保存" : "Save 并正式创建预约单"}</span>
-      </button>
-      {message ? <p className={state === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{message}</p> : null}
-    </div>
-  );
+  const canSave = Boolean(parsedPlan) && uploadState === "uploaded";
+  return <div className="warehouse-options">
+    <p className="warehouse-options__summary">Save 仅使用已解析的 boxList 与 exceptionData 及预约草稿发送 JSON；不会携带文件或重新上传。</p>
+    <button className={`warehouse-options__option ${state === "saved" ? "warehouse-options__option--selected" : ""}`} disabled={disabled || !canSave || state === "saving" || state === "saved"} onClick={() => void save()} type="button"><span>{state === "saving" ? "正在创建…" : state === "saved" ? "已保存" : "Save 并正式创建预约单"}</span></button>
+    {!canSave ? <p className="warehouse-options__empty">请先成功上传并解析附件后再创建。</p> : null}
+    {message ? <p className={state === "failed" ? "warehouse-options__empty" : "warehouse-options__summary"}>{message}</p> : null}
+  </div>;
 }
 
 function AppointmentSelectionInteractionPart({

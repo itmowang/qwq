@@ -5,8 +5,10 @@ import type {
   LoginInput,
   LoginResult,
   McpSessionInput,
-  OutboundAppointmentSaveInput,
-  OutboundAppointmentSaveResult,
+  OutboundPlanCreateInput,
+  OutboundPlanCreateResult,
+  OutboundPlanUploadInput,
+  OutboundPlanUploadResult,
   OutboundTemplateDownloadResult,
   ServiceEndpoints,
 } from "../shared/auth";
@@ -24,7 +26,8 @@ const api: DesktopApi = {
   },
   appointment: {
     downloadOutboundTemplate: (url: string): Promise<OutboundTemplateDownloadResult> => ipcRenderer.invoke("appointment:download-outbound-template", url),
-    saveOutboundSchedule: (input: OutboundAppointmentSaveInput): Promise<OutboundAppointmentSaveResult> => ipcRenderer.invoke("appointment:save-outbound-schedule", input),
+    uploadOutboundPlan: (input: OutboundPlanUploadInput): Promise<OutboundPlanUploadResult> => ipcRenderer.invoke("appointment:upload-outbound-plan", input),
+    createOutboundPlan: (input: OutboundPlanCreateInput): Promise<OutboundPlanCreateResult> => ipcRenderer.invoke("appointment:create-outbound-plan", input),
   },
 };
 

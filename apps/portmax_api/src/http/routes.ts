@@ -13,24 +13,16 @@ const tokenRequestSchema = z.object({
 const warehouseNameSchema = z.string().trim().max(128).optional().default("");
 const maxCredentialLength = 4096;
 const maxTenantIdLength = 128;
-const maxOutboundSaveFileBytes = 4 * 1024 * 1024;
-const maxOutboundSaveRequestBytes = maxOutboundSaveFileBytes + 64 * 1024;
-const allowedOutboundSaveFileTypes = new Set([
+const maxOutboundPlanFileBytes = 4 * 1024 * 1024;
+const maxOutboundPlanUploadRequestBytes = maxOutboundPlanFileBytes + 64 * 1024;
+const maxOutboundPlanCreateRequestBytes = maxOutboundPlanFileBytes + 64 * 1024;
+const allowedOutboundPlanFileTypes = new Set([
   "",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel",
 ]);
-const outboundSaveFieldNames = [
-  "warehouseName",
-  "source",
-  "serviceNo",
-  "deliveryLocation",
-  "type",
-  "estimatedAppointmentTime",
-  "remark",
-  "globalUserId",
-] as const;
-const outboundSaveFormSchema = z.object({
+const outboundPlanParsedListSchema = z.array(z.unknown()).max(10_000);
+const outboundPlanCreateSchema = z.object({
   warehouseName: z.string().trim().min(1).max(240),
   source: z.string().trim().max(240),
   serviceNo: z.string().trim().min(1).max(120),
@@ -39,7 +31,22 @@ const outboundSaveFormSchema = z.object({
   estimatedAppointmentTime: z.string().regex(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/).max(19),
   remark: z.string().trim().max(1_000),
   globalUserId: z.string().trim().min(1).max(120),
-});
+  boxList: outboundPlanParsedListSchema,
+  // 上传解析接口以文本形式返回异常明细；异常不阻止最终创建。
+  exceptionData: z.string().max(4 * 1024 * 1024),
+}).strict();
+
+function authenticatedOutboundSession(c: { req: { header: (name: string) => string | undefined } }): { bladeAuth: string; tenantId?: string } | Response {
+  const bladeAuth = c.req.header("x-portmax-blade-auth")?.trim();
+  if (!bladeAuth || bladeAuth.length > maxCredentialLength) {
+    return new Response(JSON.stringify({ error: "A valid X-Portmax-Blade-Auth header is required." }), { status: 401, headers: { "content-type": "application/json" } });
+  }
+  const tenantId = c.req.header("x-portmax-tenant-id")?.trim();
+  if (tenantId && tenantId.length > maxTenantIdLength) {
+    return new Response(JSON.stringify({ error: "Invalid X-Portmax-Tenant-Id header." }), { status: 400, headers: { "content-type": "application/json" } });
+  }
+  return { bladeAuth, ...(tenantId ? { tenantId } : {}) };
+}
 const defaultBladeOAuthAuthorization = "Basic c2FiZXI6c2FiZXJfc2VjcmV0";
 
 function getBladeOAuthAuthorization(): string {
@@ -146,96 +153,52 @@ httpRoutes.get("/warehouse-settings/by-name", async (c) => {
   }
 });
 
-/**
- * 正式创建出库预约单的固定 multipart 中继。
- * 只接受受控的预约字段与一个 Excel 文件；上游路径、鉴权、Cookie 和其他表单字段均不可由调用方指定。
- */
-httpRoutes.post("/outbound-schedule/save", async (c) => {
-  if (!c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data")) {
-    return c.json({ error: "Content-Type must be multipart/form-data." }, 415);
-  }
-
+/** Excel is parsed immediately; only file + warehouseName are accepted in this multipart relay. */
+httpRoutes.post("/outbound-schedule/upload", async (c) => {
+  if (!c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data")) return c.json({ error: "Content-Type must be multipart/form-data." }, 415);
   const contentLength = Number(c.req.header("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maxOutboundSaveRequestBytes) {
-    return c.json({ error: "The outbound attachment exceeds the 4 MiB limit." }, 413);
-  }
-
-  const rawBladeAuth = c.req.header("x-portmax-blade-auth");
-  const bladeAuth = rawBladeAuth?.trim();
-  if (!bladeAuth || bladeAuth.length > maxCredentialLength) {
-    return c.json({ error: "A valid X-Portmax-Blade-Auth header is required." }, 401);
-  }
-
-  const tenantId = c.req.header("x-portmax-tenant-id")?.trim();
-  if (tenantId && tenantId.length > maxTenantIdLength) {
-    return c.json({ error: "Invalid X-Portmax-Tenant-Id header." }, 400);
-  }
-
+  if (Number.isFinite(contentLength) && contentLength > maxOutboundPlanUploadRequestBytes) return c.json({ error: "The outbound attachment exceeds the 4 MiB limit." }, 413);
+  const session = authenticatedOutboundSession(c);
+  if (session instanceof Response) return session;
   try {
     const form = await c.req.formData();
-    const expectedNames = new Set<string>(["file", ...outboundSaveFieldNames]);
-    const entries = [...form.entries()];
-    if (entries.some(([name]) => !expectedNames.has(name))
-      || [...expectedNames].some((name) => form.getAll(name).length !== 1)) {
-      return c.json({ error: "The outbound save form must contain exactly one file and the required fixed fields." }, 400);
-    }
-
-    const parsedFields = outboundSaveFormSchema.safeParse(
-      Object.fromEntries(outboundSaveFieldNames.map((name) => [name, form.get(name)])),
-    );
-    if (!parsedFields.success) {
-      return c.json({ error: "The outbound save form contains invalid fields." }, 400);
-    }
-
+    const expectedNames = new Set(["file", "warehouseName"]);
+    if ([...form.entries()].some(([name]) => !expectedNames.has(name)) || [...expectedNames].some((name) => form.getAll(name).length !== 1)) return c.json({ error: "The outbound upload form must contain exactly one file and warehouseName." }, 400);
+    const warehouseName = z.string().trim().min(1).max(240).safeParse(form.get("warehouseName"));
     const file = form.get("file");
-    if (!(file instanceof File)
-      || !file.name
-      || file.name.length > 255
-      || /[\\/\u0000-\u001f]/.test(file.name)
-      || !/\.(xlsx|xls)$/i.test(file.name)
-      || file.size <= 0
-      || file.size > maxOutboundSaveFileBytes
-      || !allowedOutboundSaveFileTypes.has(file.type.toLowerCase())) {
-      return c.json({ error: "file must be a non-empty Excel (.xlsx or .xls) file no larger than 4 MiB." }, 400);
-    }
-
+    if (!warehouseName.success || !(file instanceof File) || !file.name || file.name.length > 255 || /[\\/\u0000-\u001f]/.test(file.name) || !/\.(xlsx|xls)$/i.test(file.name) || file.size <= 0 || file.size > maxOutboundPlanFileBytes || !allowedOutboundPlanFileTypes.has(file.type.toLowerCase())) return c.json({ error: "warehouseName and a non-empty Excel (.xlsx or .xls) file no larger than 4 MiB are required." }, 400);
     const upstreamForm = new FormData();
     upstreamForm.set("file", file, file.name);
-    for (const name of outboundSaveFieldNames) {
-      upstreamForm.set(name, parsedFields.data[name]);
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    upstreamForm.set("warehouseName", warehouseName.data);
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 30_000);
     try {
-      const upstreamResponse = await forwardUpstream({
-        path: "/api/blade-order/schedule/outbound/save",
-        method: "POST",
-        headers: {
-          accept: "application/json, text/plain, */*",
-          "blade-auth": bladeAuth,
-          "blade-requested-with": "BladeHttpRequest",
-          ...(tenantId ? { "tenant-id": tenantId } : {}),
-        },
-        body: upstreamForm,
-        signal: controller.signal,
-        // 必须使用当前登录会话，不回退到通用服务 Authorization。
-        authorization: "",
-      });
-
-      return new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        headers: selectResponseHeaders(upstreamResponse.headers),
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+      const response = await forwardUpstream({ path: "/api/blade-order/schedule/outbound/outboundPlanUpload", method: "POST", headers: { accept: "application/json, text/plain, */*", "blade-auth": session.bladeAuth, "blade-requested-with": "BladeHttpRequest", ...(session.tenantId ? { "tenant-id": session.tenantId } : {}) }, body: upstreamForm, signal: controller.signal, authorization: "" });
+      return new Response(response.body, { status: response.status, headers: selectResponseHeaders(response.headers) });
+    } finally { clearTimeout(timeout); }
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      return c.json({ error: "The upstream outbound save request timed out." }, 504);
-    }
-    const message = error instanceof Error ? error.message : "Outbound save request failed.";
-    return c.json({ error: message }, 502);
+    if (error instanceof Error && error.name === "AbortError") return c.json({ error: "The upstream outbound upload request timed out." }, 504);
+    return c.json({ error: error instanceof Error ? error.message : "Outbound upload request failed." }, 502);
+  }
+});
+
+/** Final creation accepts the validated draft and parsed data as JSON; never multipart/form-data. */
+httpRoutes.post("/outbound-schedule/create", async (c) => {
+  if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) return c.json({ error: "Content-Type must be application/json." }, 415);
+  const contentLength = Number(c.req.header("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxOutboundPlanCreateRequestBytes) return c.json({ error: "The outbound create payload exceeds the allowed size." }, 413);
+  const session = authenticatedOutboundSession(c);
+  if (session instanceof Response) return session;
+  try {
+    const body = outboundPlanCreateSchema.safeParse(await c.req.json());
+    if (!body.success) return c.json({ error: "The outbound create JSON contains invalid or unexpected fields." }, 400);
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await forwardUpstream({ path: "/api/blade-order/schedule/outbound/save", method: "POST", headers: { accept: "application/json, text/plain, */*", "content-type": "application/json", "blade-auth": session.bladeAuth, "blade-requested-with": "BladeHttpRequest", ...(session.tenantId ? { "tenant-id": session.tenantId } : {}) }, body: JSON.stringify(body.data), signal: controller.signal, authorization: "" });
+      return new Response(response.body, { status: response.status, headers: selectResponseHeaders(response.headers) });
+    } finally { clearTimeout(timeout); }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return c.json({ error: "The upstream outbound create request timed out." }, 504);
+    return c.json({ error: error instanceof Error ? error.message : "Outbound create request failed." }, 502);
   }
 });
 
