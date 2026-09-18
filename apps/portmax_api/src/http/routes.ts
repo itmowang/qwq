@@ -11,6 +11,7 @@ const tokenRequestSchema = z.object({
 });
 
 const warehouseNameSchema = z.string().trim().max(128).optional().default("");
+const todoTimeStateSchema = z.enum(["Normal", "Urgent", "Overdue"]);
 const maxCredentialLength = 4096;
 const maxTenantIdLength = 128;
 const maxOutboundPlanFileBytes = 4 * 1024 * 1024;
@@ -150,6 +151,80 @@ httpRoutes.get("/warehouse-settings/by-name", async (c) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Warehouse setting request failed.";
     return c.json({ error: message }, 502);
+  }
+});
+
+/**
+ * 当前登录用户的任务统计与列表代理。上游路径、分类、页码和状态均受限，
+ * 避免调用方透传任意 Blade 路径或使用服务身份读取其他用户的任务。
+ */
+httpRoutes.get("/work-todos/count", async (c) => {
+  const session = authenticatedOutboundSession(c);
+  if (session instanceof Response) return session;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await forwardUpstream({
+        path: "/api/blade-flow/work/todo-list-count?type=single",
+        method: "GET",
+        headers: {
+          accept: "application/json, text/plain, */*",
+          "blade-auth": session.bladeAuth,
+          "blade-requested-with": "BladeHttpRequest",
+          ...(session.tenantId ? { "tenant-id": session.tenantId } : {}),
+        },
+        signal: controller.signal,
+        authorization: "",
+      });
+      return new Response(response.body, { status: response.status, headers: selectResponseHeaders(response.headers) });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return c.json({ error: "The upstream todo count request timed out." }, 504);
+    return c.json({ error: error instanceof Error ? error.message : "Todo count request failed." }, 502);
+  }
+});
+
+httpRoutes.get("/work-todos", async (c) => {
+  const parsedTimeState = todoTimeStateSchema.safeParse(c.req.query("timeState"));
+  if (!parsedTimeState.success) return c.json({ error: "timeState must be Normal, Urgent, or Overdue." }, 400);
+  const session = authenticatedOutboundSession(c);
+  if (session instanceof Response) return session;
+
+  try {
+    const query = new URLSearchParams({
+      current: "1",
+      size: "50",
+      category: "single",
+      timeState: parsedTimeState.data,
+      creatTimeN: "",
+      processDefinitionKey: "",
+    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await forwardUpstream({
+        path: `/api/blade-flow/work/todoList?${query.toString()}`,
+        method: "GET",
+        headers: {
+          accept: "application/json, text/plain, */*",
+          "blade-auth": session.bladeAuth,
+          "blade-requested-with": "BladeHttpRequest",
+          ...(session.tenantId ? { "tenant-id": session.tenantId } : {}),
+        },
+        signal: controller.signal,
+        authorization: "",
+      });
+      return new Response(response.body, { status: response.status, headers: selectResponseHeaders(response.headers) });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") return c.json({ error: "The upstream todo list request timed out." }, 504);
+    return c.json({ error: error instanceof Error ? error.message : "Todo list request failed." }, 502);
   }
 });
 

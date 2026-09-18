@@ -76,6 +76,7 @@ export const appointmentTypeOptionSchema = z.object({
 export const appointmentTaskForOptionSchema = z.object({
   value: z.string().trim().min(1).max(120).describe("任务人的稳定 ID，仅用于恢复本次选择。"),
   id: z.string().trim().min(1).max(120).describe("Portmax 任务人 ID。"),
+  account: z.string().trim().min(1).max(120).optional().describe("Portmax 登录账号；可作为 Task For 的受控匹配标识。"),
   globalUserId: z.string().trim().min(1).max(120).describe("创建出库计划时提交的全局用户 ID。"),
   globalUserCode: z.string().trim().min(1).max(120).describe("Portmax 返回的全局用户编码；兼容旧上游字段。"),
   name: z.string().trim().min(1).max(240).describe("任务人显示名称。"),
@@ -360,6 +361,7 @@ function getTaskForOptions(value: unknown): z.infer<typeof appointmentTaskForOpt
   };
   const options = parsedEntries.data.map((entry) => {
     const id = field(entry, ["id", "userId", "user_id"]);
+    const account = field(entry, ["account"]);
     // 新版创建接口使用 globalUserId；旧上游仍可能只返回 globalUserCode，因此保留并映射该兼容字段。
     const globalUserId = field(entry, ["globalUserId", "globalUserCode"]);
     const globalUserCode = field(entry, ["globalUserCode", "globalUserId"]);
@@ -367,7 +369,12 @@ function getTaskForOptions(value: unknown): z.infer<typeof appointmentTaskForOpt
     if (!id || !globalUserId || !globalUserCode || !name) {
       throw new Error("Task For 接口包含无法安全映射的用户。必须返回 id/userId/user_id、globalUserId 或 globalUserCode 和显示名称。");
     }
-    return { value: id, id, globalUserId, globalUserCode, name, label: name === id ? name : `${name}（${id}）` };
+    const labelParts = [
+      account ? `account：${account}` : undefined,
+      `全局账号：${globalUserCode}`,
+      `ID：${id}`,
+    ].filter((part): part is string => Boolean(part));
+    return { value: id, id, account, globalUserId, globalUserCode, name, label: `${name}（${labelParts.join("；")}）` };
   });
   if (new Set(options.map((option) => option.value)).size !== options.length) {
     throw new Error("Task For 接口包含重复的稳定用户 ID。");
@@ -421,12 +428,16 @@ function findUniqueExplicitOption<T extends { label: string; name: string }>(
   request: string,
   options: readonly T[],
   identifiers: (option: T) => readonly string[],
+  minimumIdentifierLength = 4,
 ): T | undefined {
   const normalizedRequest = normalizeSelectionText(request);
-  const matchingOptions = (values: (option: T) => readonly string[]): T[] => options.filter((option) =>
+  const matchingOptions = (
+    values: (option: T) => readonly string[],
+    minimumLength = 4,
+  ): T[] => options.filter((option) =>
     values(option)
       .map(normalizeSelectionText)
-      .filter((candidate) => candidate.length >= 4)
+      .filter((candidate) => candidate.length >= minimumLength)
       .some((candidate) => normalizedRequest.includes(candidate)),
   );
   const uniqueMatch = (matches: readonly T[]): T | undefined => matches.length === 1 ? matches[0] : undefined;
@@ -435,7 +446,7 @@ function findUniqueExplicitOption<T extends { label: string; name: string }>(
   const labelMatches = matchingOptions((option) => [option.label]);
   if (labelMatches.length > 0) return uniqueMatch(labelMatches);
 
-  const identifierMatches = matchingOptions(identifiers);
+  const identifierMatches = matchingOptions(identifiers, minimumIdentifierLength);
   if (identifierMatches.length > 0) return uniqueMatch(identifierMatches);
 
   return uniqueMatch(matchingOptions((option) => [option.name]));
@@ -497,7 +508,7 @@ export const selectAppointmentWarehouseNameStep = createStep({
     return suspend({
       ...inputData,
       prompt: options.length > 0
-        ? "未能从本次请求中唯一确定仓库，请选择仓库后继续创建预约单。当前流程只收集预约单草稿，不会提交或创建任何记录。"
+        ? "未能从本次请求中唯一确定仓库，请选择仓库后继续创建预约单。当前步骤仅收集正式创建所需字段；完成附件上传并确认 Save 后，系统将正式创建预约单。"
         : "未查询到可用的仓库设置，暂时无法继续创建预约单。",
       total: allOptions.length,
       truncated: allOptions.length > options.length,
@@ -547,7 +558,7 @@ export const selectAppointmentAddOnProductStep = createStep({
     return suspend({
       ...inputData,
       prompt: options.length > 0
-        ? `已选择仓库“${inputData.warehouse.label}”，但未能从本次请求中唯一确定 Add-on Product，请选择后继续。当前流程只收集预约单草稿，不会提交或创建任何记录。`
+        ? `已选择仓库“${inputData.warehouse.label}”，但未能从本次请求中唯一确定 Add-on Product，请选择后继续。当前步骤仅收集正式创建所需字段；完成附件上传并确认 Save 后，系统将正式创建预约单。`
         : "未查询到可用的 Add-on Product，暂时无法继续创建预约单。",
       total: allOptions.length,
       truncated: allOptions.length > options.length,
@@ -594,7 +605,7 @@ export const selectAppointmentDeliveryLocationStep = createStep({
     return suspend({
       ...inputData,
       prompt: options.length > 0
-        ? `已选择仓库“${inputData.warehouse.label}”和附加产品“${inputData.addOnProduct.label}”，请选择Delivery Location后继续创建预约单。当前流程只收集预约单草稿，不会提交或创建任何记录。`
+        ? `已选择仓库“${inputData.warehouse.label}”和附加产品“${inputData.addOnProduct.label}”，请选择Delivery Location后继续创建预约单。当前步骤仅收集正式创建所需字段；完成附件上传并确认 Save 后，系统将正式创建预约单。`
         : "Delivery Location字典未返回可选择的项目，暂时无法继续创建预约单。",
       total: allOptions.length,
       truncated: allOptions.length > options.length,
@@ -622,7 +633,7 @@ export const selectAppointmentTypeStep = createStep({
 
     return suspend({
       ...inputData,
-      prompt: `已选择仓库“${inputData.warehouse.label}”、附加产品“${inputData.addOnProduct.label}”和 Delivery Location“${inputData.deliveryLocation.label}”，请选择预约单类型后继续创建预约单。当前流程只收集预约单草稿，不会提交或创建任何记录。`,
+      prompt: `已选择仓库“${inputData.warehouse.label}”、附加产品“${inputData.addOnProduct.label}”和 Delivery Location“${inputData.deliveryLocation.label}”，请选择预约单类型后继续创建预约单。当前步骤仅收集正式创建所需字段；完成附件上传并确认 Save 后，系统将正式创建预约单。`,
       total: appointmentTypeOptions.length, truncated: false, options: [...appointmentTypeOptions],
     });
   },
@@ -670,7 +681,9 @@ export const selectAppointmentTaskForStep = createStep({
     const explicitlyRequestedTaskFor = findUniqueExplicitOption(
       inputData.request,
       allOptions,
-      (taskFor) => [taskFor.id],
+      (taskFor) => [taskFor.id, taskFor.account ?? ""],
+      // Task For 的受控登录账号可为三位数（如 035）；标签和名称仍使用默认的四字符防误匹配阈值。
+      3,
     );
     if (explicitlyRequestedTaskFor) return { ...inputData, taskFor: explicitlyRequestedTaskFor };
 
@@ -678,7 +691,7 @@ export const selectAppointmentTaskForStep = createStep({
     return suspend({
       ...inputData,
       prompt: options.length > 0
-        ? `已选择仓库、附加产品、Delivery Location、预约单类型和 Estimated Appointment Time“${inputData.estimatedAppointmentTime}”，请选择 Task For 后继续创建预约单。当前流程只收集预约单草稿，不会提交或创建任何记录。`
+        ? `已选择仓库、附加产品、Delivery Location、预约单类型和 Estimated Appointment Time“${inputData.estimatedAppointmentTime}”，请选择 Task For 后继续创建预约单。当前步骤仅收集正式创建所需字段；完成附件上传并确认 Save 后，系统将正式创建预约单。`
         : "Task For 接口未返回可选择的用户，暂时无法继续创建预约单。",
       total: allOptions.length,
       truncated: allOptions.length > options.length,

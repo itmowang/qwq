@@ -66,6 +66,34 @@ export type OutboundPlanCreateResult =
   | { success: true; message: string }
   | { success: false; message: string; status?: number };
 
+export type TodoTimeState = "Normal" | "Urgent" | "Overdue";
+
+export type TodoCounts = Record<TodoTimeState, number>;
+
+export type TodoListItem = {
+  id: string;
+  referenceNo?: string;
+  url?: string;
+  title: string;
+  module?: string;
+  subtitle?: string;
+  createdAt?: string;
+  dueDate?: string;
+  deadline?: string;
+};
+
+export type TaskUrlOpenResult =
+  | { success: true }
+  | { success: false; message: string };
+
+export type TodoCountsResult =
+  | { success: true; counts: TodoCounts }
+  | { success: false; message: string; status?: number };
+
+export type TodoListResult =
+  | { success: true; items: TodoListItem[] }
+  | { success: false; message: string; status?: number };
+
 export type DesktopApi = {
   auth: {
     login: (input: LoginInput) => Promise<LoginResult>;
@@ -81,5 +109,10 @@ export type DesktopApi = {
     downloadOutboundTemplate: (url: string) => Promise<OutboundTemplateDownloadResult>;
     uploadOutboundPlan: (input: OutboundPlanUploadInput) => Promise<OutboundPlanUploadResult>;
     createOutboundPlan: (input: OutboundPlanCreateInput) => Promise<OutboundPlanCreateResult>;
+  };
+  tasks: {
+    getCounts: () => Promise<TodoCountsResult>;
+    getList: (timeState: TodoTimeState) => Promise<TodoListResult>;
+    openUrl: (url: string) => Promise<TaskUrlOpenResult>;
   };
 };

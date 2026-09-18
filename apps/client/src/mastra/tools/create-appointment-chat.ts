@@ -47,7 +47,7 @@ const deliveryLocationOptionSchema = z.object({
   value: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(240), label: z.string().trim().min(1).max(400),
 });
 const appointmentTypeOptionSchema = z.object({ value: z.enum(["跨境", "本土"]), name: z.enum(["跨境", "本土"]), label: z.enum(["跨境", "本土"]) });
-const taskForOptionSchema = z.object({ value: z.string().trim().min(1).max(120), id: z.string().trim().min(1).max(120), globalUserId: z.string().trim().min(1).max(120), globalUserCode: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(240), label: z.string().trim().min(1).max(400) });
+const taskForOptionSchema = z.object({ value: z.string().trim().min(1).max(120), id: z.string().trim().min(1).max(120), account: z.string().trim().min(1).max(120).optional(), globalUserId: z.string().trim().min(1).max(120), globalUserCode: z.string().trim().min(1).max(120), name: z.string().trim().min(1).max(240), label: z.string().trim().min(1).max(400) });
 const outboundTemplateSchema = z.object({ code: z.literal("save_outbound_template"), url: z.string().url().max(2_000) });
 const submissionDraftSchema = z.object({
   warehouseName: z.string().trim().min(1).max(240),
@@ -208,7 +208,7 @@ function workflowFailureMessage(result: unknown, fallback: string): string {
 /** 启动创建预约单流程。完整请求中已提供且可在受控候选中唯一匹配的字段会直接写入草稿；仅缺失、无效或歧义字段才等待选择。 */
 export const startCreateAppointmentChatTool = createTool({
   id: startCreateAppointmentChatToolId,
-  description: "启动创建预约单流程：先确定性解析完整请求，再从受控候选唯一匹配仓库、Add-on Product、Delivery Location、预约类型、预计时间与 Task For；仅缺失、无效或歧义字段才要求选择。不会创建或提交预约单。",
+  description: "启动正式创建预约单流程：先确定性解析完整请求，再从受控候选唯一匹配仓库、Add-on Product、Delivery Location、预约类型、预计时间与 Task For；仅缺失、无效或歧义字段才要求选择。字段与附件确认完成后，用户点击 Save 会正式创建预约单。",
   inputSchema: z.object({ request: requestSchema }),
   outputSchema: interactionOutputSchema,
   execute: async ({ request }, { requestContext }) => {

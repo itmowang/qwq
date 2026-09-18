@@ -19,14 +19,14 @@ const requestSchema = {
   body: z.unknown().optional().describe("JSON 请求体；无请求体时请省略。"),
 };
 
-const outboundSchedulePageSchema = {
-  current: z.number().int().positive().describe("从 1 开始的页码。"),
-  size: z.number().int().positive().describe("每页返回的记录数。"),
+const appointmentPageSchema = {
+  current: z.number().int().positive().describe("预约单列表从 1 开始的页码。"),
+  size: z.number().int().positive().describe("每页返回的预约单数量。"),
   filter: z
     .array(z.record(z.string(), z.unknown()))
     .default([])
     .describe("Blade 查询筛选条件，例如 [{ column, fieldType, tableName, cnName, val }]。"),
-  selectType: z.number().int().default(0).describe("Blade 出库计划查询的选择类型。"),
+  selectType: z.number().int().default(0).describe("预约单接口的选择类型。"),
 };
 
 const dictionarySchema = {
@@ -39,6 +39,7 @@ const warehouseSettingsSchema = {
 
 const addOnProductSchema = {};
 const taskForUsersByFlowSchema = {};
+const outboundPlanTodoListSchema = {};
 
 function getOutboundScheduleCredentials(sessionCredentials: McpSessionCredentials | undefined): McpSessionCredentials {
   const bladeAuth = sessionCredentials?.bladeAuth.trim() || process.env.PORTMAX_OUTBOUND_SCHEDULE_BLADE_AUTH?.trim();
@@ -167,6 +168,52 @@ export function createMcpTransport(options: McpTransportOptions = {}) {
       } catch (error) {
         return {
           content: [{ type: "text", text: error instanceof Error ? error.message : "Task For 查询失败。" }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_outbound_plan_todo_list",
+    {
+      title: "查询我负责的预约单 Normal 待办",
+      description: "查询当前登录用户负责的预约单 Normal 待办；请求路径、方法和全部查询参数均已固定。",
+      inputSchema: outboundPlanTodoListSchema,
+    },
+    async () => {
+      try {
+        const credentials = getTaskForUsersCredentials();
+        const upstreamResponse = await forwardUpstream({
+          path: "/api/blade-flow/work/todoList?current=1&size=50&category=single&timeState=Normal&creatTimeN=&processDefinitionKey=OutboundPlan",
+          method: "GET",
+          headers: {
+            accept: "application/json, text/plain, */*",
+            "blade-auth": credentials.bladeAuth,
+            "blade-requested-with": "BladeHttpRequest",
+            ...(credentials.tenantId ? { "tenant-id": credentials.tenantId } : {}),
+          },
+          // 仅使用当前 MCP session 的 Blade-Auth；不使用通用 Authorization 或静态凭据回退。
+          authorization: "",
+        });
+        const text = await upstreamResponse.text();
+        const summary = JSON.stringify(
+          {
+            status: upstreamResponse.status,
+            contentType: upstreamResponse.headers.get("content-type"),
+            body: text,
+          },
+          null,
+          2,
+        );
+
+        return {
+          content: [{ type: "text", text: summary }],
+          isError: !upstreamResponse.ok,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : "出库计划 Normal 待办查询失败。" }],
           isError: true,
         };
       }
@@ -327,9 +374,9 @@ export function createMcpTransport(options: McpTransportOptions = {}) {
   server.registerTool(
     "get_outbound_schedule_page",
     {
-      title: "获取出库计划分页数据",
-      description: "从已配置的 Portmax 上游服务查询出库计划分页数据；请求路径和方法均已固定。",
-      inputSchema: outboundSchedulePageSchema,
+      title: "获取全部预约单分页数据",
+      description: "从已配置的 Portmax 上游服务查询全部预约单分页数据；请求路径和方法均已固定。",
+      inputSchema: appointmentPageSchema,
     },
     async ({ current, size, filter, selectType }) => {
       try {
@@ -365,7 +412,7 @@ export function createMcpTransport(options: McpTransportOptions = {}) {
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : "出库计划请求失败。" }],
+          content: [{ type: "text", text: error instanceof Error ? error.message : "预约单查询失败。" }],
           isError: true,
         };
       }

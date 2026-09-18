@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useChat, type UIMessage } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import type { AuthenticatedUser, ServiceEndpoints } from "../../shared/auth";
+import type { AuthenticatedUser, ServiceEndpoints, TodoCounts, TodoListItem, TodoTimeState } from "../../shared/auth";
 
 type Credentials = {
   tenantId: string;
@@ -101,7 +101,7 @@ type AppointmentAddOnProductOption = {
 };
 type AppointmentDeliveryLocationOption = { value: string; name: string; label: string; };
 type AppointmentTypeOption = { value: "跨境" | "本土"; name: "跨境" | "本土"; label: "跨境" | "本土"; };
-type AppointmentTaskForOption = { value: string; id: string; globalUserId?: string; globalUserCode?: string; name: string; label: string; };
+type AppointmentTaskForOption = { value: string; id: string; account?: string; globalUserId?: string; globalUserCode?: string; name: string; label: string; };
 type OutboundPlanSubmissionDraft = { warehouseName: string; source: string; serviceNo: string; deliveryLocation: string; type: "跨境" | "本土"; estimatedAppointmentTime: string; remark: string; globalUserId: string; };
 type AppointmentOutboundTemplate = { code: "save_outbound_template"; url: string; };
 type AppointmentSelectableOption = AppointmentWarehouseOption | AppointmentAddOnProductOption | AppointmentDeliveryLocationOption | AppointmentTypeOption | AppointmentTaskForOption | { value: string; label: string; };
@@ -353,12 +353,13 @@ function parseAppointmentTaskForOptions(value: unknown): AppointmentTaskForOptio
     if (!isRecord(option)) return null;
     const valueText = optionalNonBlankString(option.value);
     const id = optionalNonBlankString(option.id);
+    const account = option.account === undefined ? undefined : optionalNonBlankString(option.account);
     const globalUserId = option.globalUserId === undefined ? undefined : optionalNonBlankString(option.globalUserId);
     const globalUserCode = option.globalUserCode === undefined ? undefined : optionalNonBlankString(option.globalUserCode);
     const name = optionalNonBlankString(option.name);
     const label = optionalNonBlankString(option.label);
-    if ((option.globalUserId !== undefined && !globalUserId) || (option.globalUserCode !== undefined && !globalUserCode)) return null;
-    return valueText && id && name && label && (globalUserId || globalUserCode) ? { value: valueText, id, ...(globalUserId ? { globalUserId } : {}), ...(globalUserCode ? { globalUserCode } : {}), name, label } : null;
+    if ((option.account !== undefined && !account) || (option.globalUserId !== undefined && !globalUserId) || (option.globalUserCode !== undefined && !globalUserCode)) return null;
+    return valueText && id && name && label && (globalUserId || globalUserCode) ? { value: valueText, id, ...(account ? { account } : {}), ...(globalUserId ? { globalUserId } : {}), ...(globalUserCode ? { globalUserCode } : {}), name, label } : null;
   });
   return options.some((option) => option === null) ? null : options as AppointmentTaskForOption[];
 }
@@ -1568,6 +1569,174 @@ function ConversationPanel({
   );
 }
 
+const taskStatusCards: Array<{ state: TodoTimeState; label: string; description: string; tone: string }> = [
+  { state: "Normal", label: "Normal", description: "常规待办", tone: "normal" },
+  { state: "Urgent", label: "Urgent", description: "紧急待办", tone: "urgent" },
+  { state: "Overdue", label: "Overdue", description: "已逾期待办", tone: "overdue" },
+];
+
+function TaskOverview(): React.JSX.Element {
+  const [counts, setCounts] = useState<TodoCounts>({ Normal: 0, Urgent: 0, Overdue: 0 });
+  const [countsError, setCountsError] = useState<string | null>(null);
+  const [isLoadingCounts, setIsLoadingCounts] = useState(true);
+  const [selectedState, setSelectedState] = useState<TodoTimeState | null>(null);
+  const [items, setItems] = useState<TodoListItem[]>([]);
+  const [listError, setListError] = useState<string | null>(null);
+  const [isLoadingList, setIsLoadingList] = useState(false);
+  const [openingTaskId, setOpeningTaskId] = useState<string | null>(null);
+  const [openTaskError, setOpenTaskError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const selectedCard = taskStatusCards.find((card) => card.state === selectedState) ?? null;
+
+  useEffect(() => {
+    let active = true;
+    setIsLoadingCounts(true);
+    setCountsError(null);
+    void window.api.tasks.getCounts().then((result) => {
+      if (!active) return;
+      if (result.success) setCounts(result.counts);
+      else setCountsError(result.message);
+    }).catch(() => {
+      if (active) setCountsError("任务统计服务不可用，请稍后刷新。");
+    }).finally(() => {
+      if (active) setIsLoadingCounts(false);
+    });
+    return () => { active = false; };
+  }, [refreshVersion]);
+
+  useEffect(() => {
+    if (!selectedState) return;
+    let active = true;
+    setIsLoadingList(true);
+    setListError(null);
+    setOpenTaskError(null);
+    setItems([]);
+    void window.api.tasks.getList(selectedState).then((result) => {
+      if (!active) return;
+      if (result.success) setItems(result.items);
+      else setListError(result.message);
+    }).catch(() => {
+      if (active) setListError("任务列表服务不可用，请稍后重试。");
+    }).finally(() => {
+      if (active) setIsLoadingList(false);
+    });
+    return () => { active = false; };
+  }, [selectedState]);
+
+  async function openTask(item: TodoListItem): Promise<void> {
+    if (!item.url || openingTaskId) return;
+    setOpeningTaskId(item.id);
+    setOpenTaskError(null);
+    try {
+      const result = await window.api.tasks.openUrl(item.url);
+      if (!result.success) setOpenTaskError(result.message);
+    } catch {
+      setOpenTaskError("无法在浏览器中打开任务单。");
+    } finally {
+      setOpeningTaskId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!selectedState) return;
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setSelectedState(null);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [selectedState]);
+
+  return (
+    <section aria-label="我的任务" className="task-overview">
+      <div className="task-overview__header">
+        <div>
+          <p className="task-overview__title">我的任务</p>
+          <p className="task-overview__hint">点击类别查看前 50 条待办任务</p>
+        </div>
+        <button className="task-overview__refresh" disabled={isLoadingCounts} onClick={() => setRefreshVersion((version) => version + 1)} type="button">
+          {isLoadingCounts ? "正在加载…" : "刷新"}
+        </button>
+      </div>
+      <div className="task-overview__cards">
+        {taskStatusCards.map((card) => (
+          <button
+            aria-label={`查看 ${card.label} 任务，共 ${counts[card.state]} 条`}
+            className={`task-overview__card task-overview__card--${card.tone}`}
+            disabled={isLoadingCounts}
+            key={card.state}
+            onClick={() => setSelectedState(card.state)}
+            type="button"
+          >
+            <span aria-hidden="true" className="task-overview__indicator" />
+            <span>
+              <span className="task-overview__label">{card.label}</span>
+              <span className="task-overview__description">{card.description}</span>
+            </span>
+            <span className="task-overview__count">{isLoadingCounts ? "—" : counts[card.state]}</span>
+          </button>
+        ))}
+      </div>
+      {countsError ? <p className="task-overview__error" role="alert">{countsError}</p> : null}
+
+      {selectedState && selectedCard ? (
+        <div className="task-dialog-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedState(null); }}>
+          <section aria-labelledby="task-dialog-title" aria-modal="true" className="task-dialog" role="dialog">
+            <header className="task-dialog__header">
+              <div>
+                <p className="task-dialog__eyebrow">我的任务 · {selectedCard.label}</p>
+                <h2 className="task-dialog__title" id="task-dialog-title">{selectedCard.description}</h2>
+              </div>
+              <button aria-label="关闭任务列表" className="task-dialog__close" onClick={() => setSelectedState(null)} type="button">×</button>
+            </header>
+            <div aria-live="polite" className="task-dialog__body">
+              {isLoadingList ? <p className="task-dialog__message">正在加载任务列表…</p> : null}
+              {listError ? <p className="task-dialog__message task-dialog__message--error" role="alert">{listError}</p> : null}
+              {openTaskError ? <p className="task-dialog__message task-dialog__message--error" role="alert">{openTaskError}</p> : null}
+              {!isLoadingList && !listError && items.length === 0 ? <p className="task-dialog__message">暂无此类待办任务。</p> : null}
+              {!isLoadingList && !listError && items.length > 0 ? (
+                <ul className="task-list">
+                  {items.map((item, index) => {
+                    const dueDate = item.dueDate ?? item.deadline;
+                    return (
+                      <li className="task-list__item" key={`${item.id}-${index}`}>
+                        <div className="task-list__reference">
+                          <span className="task-list__reference-label">Reference No.</span>
+                          {item.referenceNo && item.url ? (
+                            <a
+                              aria-label={`打开任务单 ${item.referenceNo}`}
+                              className="task-list__reference-link"
+                              href={item.url}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                void openTask(item);
+                              }}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              {openingTaskId === item.id ? "正在打开…" : item.referenceNo}
+                            </a>
+                          ) : (
+                            <span className="task-list__title" title={item.title}>{item.referenceNo ?? item.title}</span>
+                          )}
+                        </div>
+                        <span className="task-list__name" title={item.title}>{item.title}</span>
+                        {item.module ? <span className="task-list__module"><span className="task-list__field-label">Module</span>{item.module}</span> : null}
+                        {item.subtitle ? <span className="task-list__subtitle" title={item.subtitle}>{item.subtitle}</span> : null}
+                        {dueDate ? <span className="task-list__due-date"><span className="task-list__field-label">Due Date</span>{dueDate}</span> : null}
+                        {item.createdAt ? <span className="task-list__date">创建：{item.createdAt}</span> : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ChatHome({ user, onLogout }: { user: AuthenticatedUser; onLogout: () => void }): React.JSX.Element {
   const [conversations, setConversations] = useState<Conversation[]>(() => [createConversation()]);
   const [activeConversationId, setActiveConversationId] = useState(() => conversations[0].id);
@@ -1686,6 +1855,8 @@ function ChatHome({ user, onLogout }: { user: AuthenticatedUser; onLogout: () =>
           {user.edition ? <span> · {user.edition}</span> : null}
           <span> · 租户 {user.tenantId}</span>
         </div>
+
+        <TaskOverview />
 
         <ConversationPanel
           conversation={activeConversation}

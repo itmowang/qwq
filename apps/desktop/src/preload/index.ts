@@ -11,6 +11,10 @@ import type {
   OutboundPlanUploadResult,
   OutboundTemplateDownloadResult,
   ServiceEndpoints,
+  TodoCountsResult,
+  TodoListResult,
+  TodoTimeState,
+  TaskUrlOpenResult,
 } from "../shared/auth";
 
 const api: DesktopApi = {
@@ -28,6 +32,11 @@ const api: DesktopApi = {
     downloadOutboundTemplate: (url: string): Promise<OutboundTemplateDownloadResult> => ipcRenderer.invoke("appointment:download-outbound-template", url),
     uploadOutboundPlan: (input: OutboundPlanUploadInput): Promise<OutboundPlanUploadResult> => ipcRenderer.invoke("appointment:upload-outbound-plan", input),
     createOutboundPlan: (input: OutboundPlanCreateInput): Promise<OutboundPlanCreateResult> => ipcRenderer.invoke("appointment:create-outbound-plan", input),
+  },
+  tasks: {
+    getCounts: (): Promise<TodoCountsResult> => ipcRenderer.invoke("tasks:get-counts"),
+    getList: (timeState: TodoTimeState): Promise<TodoListResult> => ipcRenderer.invoke("tasks:get-list", timeState),
+    openUrl: (url: string): Promise<TaskUrlOpenResult> => ipcRenderer.invoke("tasks:open-url", url),
   },
 };
 

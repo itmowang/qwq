@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFile, rename, unlink, writeFile } from "fs/promises";
 import { join } from "path";
 import { Readable } from "stream";
-import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell } from "electron";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 import icon from "../../resources/icon.png?asset";
 import type {
@@ -16,6 +16,12 @@ import type {
   OutboundPlanUploadResult,
   OutboundTemplateDownloadResult,
   ServiceEndpoints,
+  TaskUrlOpenResult,
+  TodoCounts,
+  TodoCountsResult,
+  TodoListItem,
+  TodoListResult,
+  TodoTimeState,
 } from "../shared/auth";
 
 const endpointConfigFileName = "portmax-endpoints.json";
@@ -590,6 +596,188 @@ async function createOutboundPlan(rawInput: unknown): Promise<OutboundPlanCreate
   }
 }
 
+const todoTimeStates: TodoTimeState[] = ["Normal", "Urgent", "Overdue"];
+
+function isTodoTimeState(value: unknown): value is TodoTimeState {
+  return typeof value === "string" && todoTimeStates.includes(value as TodoTimeState);
+}
+
+function todoResponseData(payload: unknown): unknown {
+  return isRecord(payload) && "data" in payload ? payload.data : payload;
+}
+
+function todoCountValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return null;
+}
+
+function normalizedTodoKey(value: string): string {
+  return value.replace(/[^a-z]/gi, "").toLowerCase();
+}
+
+function countForTodoState(record: Record<string, unknown>, state: TodoTimeState): number | null {
+  const normalizedState = state.toLowerCase();
+  for (const [key, value] of Object.entries(record)) {
+    const normalizedKey = normalizedTodoKey(key);
+    if (
+      normalizedKey === normalizedState ||
+      normalizedKey === `${normalizedState}count` ||
+      normalizedKey === `${normalizedState}total` ||
+      normalizedKey === `${normalizedState}num` ||
+      normalizedKey === `${normalizedState}number`
+    ) {
+      return todoCountValue(value);
+    }
+  }
+  return null;
+}
+
+function parseTodoCounts(payload: unknown): TodoCounts | null {
+  const data = todoResponseData(payload);
+  const source = isRecord(data)
+    ? data
+    : Array.isArray(data)
+      ? Object.fromEntries(data.filter(isRecord).map((item) => [String(item.timeState ?? item.state ?? item.type ?? ""), item.count ?? item.total ?? item.num]))
+      : null;
+  if (!source) return null;
+
+  const values = todoTimeStates.map((state) => countForTodoState(source, state));
+  if (values.every((value) => value === null)) return null;
+  return {
+    Normal: values[0] ?? 0,
+    Urgent: values[1] ?? 0,
+    Overdue: values[2] ?? 0,
+  };
+}
+
+function todoText(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim().slice(0, 500);
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
+  return undefined;
+}
+
+function todoUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_000) return undefined;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function todoRows(payload: unknown): Record<string, unknown>[] | null {
+  const data = todoResponseData(payload);
+  if (Array.isArray(data)) return data.filter(isRecord);
+  if (!isRecord(data)) return null;
+
+  for (const value of [data.records, data.list, data.items, data.rows, isRecord(data.page) ? data.page.records : undefined]) {
+    if (Array.isArray(value)) return value.filter(isRecord);
+  }
+  return null;
+}
+
+function parseTodoList(payload: unknown): TodoListItem[] | null {
+  const rows = todoRows(payload);
+  if (!rows) return null;
+
+  return rows.slice(0, 50).map((row, index) => {
+    const title = todoText(row, ["taskName", "title", "name", "processName", "processDefinitionName"]) ?? "待办任务";
+    const referenceNo = todoText(row, ["orderSoNo", "referenceNo", "referenceNumber"]);
+    const url = todoUrl(row.url);
+    const module = todoText(row, ["module", "moduleName", "moduleTitle", "processDefinitionName", "processName"]);
+    const subtitle = todoText(row, ["businessName", "taskDefinitionName"]);
+    const createdAt = todoText(row, ["createTime", "createdAt", "createDate", "startTime"]);
+    const dueDate = todoText(row, ["dueDate", "dueTime", "deadline", "endTime", "expireTime"]);
+    const deadline = dueDate;
+    const id = todoText(row, ["id", "taskId", "processInstanceId", "procInstId"]) ?? `todo-${index}`;
+    return {
+      id,
+      ...(referenceNo ? { referenceNo } : {}),
+      ...(url ? { url } : {}),
+      title,
+      ...(module ? { module } : {}),
+      ...(subtitle && subtitle !== title && subtitle !== module ? { subtitle } : {}),
+      ...(createdAt ? { createdAt } : {}),
+      ...(dueDate ? { dueDate } : {}),
+      ...(deadline ? { deadline } : {}),
+    };
+  });
+}
+
+async function todoRequest(path: "/work-todos/count" | "/work-todos", timeState?: TodoTimeState): Promise<{ response: Response; payload: unknown }> {
+  const session = await readValidPersistedSession();
+  if (!session) throw new Error("SESSION_EXPIRED");
+  const endpoint = new URL(path, serviceEndpoints.portmaxApiUrl);
+  if (timeState) endpoint.searchParams.set("timeState", timeState);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        accept: "application/json, text/plain, */*",
+        "x-portmax-blade-auth": session.accessToken,
+        "x-portmax-tenant-id": session.user.tenantId,
+      },
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload: unknown = null;
+    try { payload = text ? JSON.parse(text) : null; } catch { /* The proxy may return an upstream plain-text error. */ }
+    return { response, payload };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getTodoCounts(): Promise<TodoCountsResult> {
+  try {
+    const { response, payload } = await todoRequest("/work-todos/count");
+    const counts = parseTodoCounts(payload);
+    if (!response.ok || isBusinessFailure(payload) || !counts) {
+      return { success: false, status: response.status, message: saveResponseMessage(payload, "任务统计未返回可识别的数据。") };
+    }
+    return { success: true, counts };
+  } catch (error) {
+    if (error instanceof Error && error.message === "SESSION_EXPIRED") return { success: false, message: "登录会话已失效，请重新登录后查看任务。" };
+    if (error instanceof Error && error.name === "AbortError") return { success: false, message: "任务统计请求超时，请稍后刷新。" };
+    return { success: false, message: "无法获取任务统计，请确认 Portmax 服务可用。" };
+  }
+}
+
+async function getTodoList(rawTimeState: unknown): Promise<TodoListResult> {
+  if (!isTodoTimeState(rawTimeState)) return { success: false, message: "任务状态无效。" };
+  try {
+    const { response, payload } = await todoRequest("/work-todos", rawTimeState);
+    const items = parseTodoList(payload);
+    if (!response.ok || isBusinessFailure(payload) || !items) {
+      return { success: false, status: response.status, message: saveResponseMessage(payload, "任务列表未返回可识别的数据。") };
+    }
+    return { success: true, items };
+  } catch (error) {
+    if (error instanceof Error && error.message === "SESSION_EXPIRED") return { success: false, message: "登录会话已失效，请重新登录后查看任务。" };
+    if (error instanceof Error && error.name === "AbortError") return { success: false, message: "任务列表请求超时，请稍后重试。" };
+    return { success: false, message: "无法获取任务列表，请确认 Portmax 服务可用。" };
+  }
+}
+
+async function openTodoUrl(rawUrl: unknown): Promise<TaskUrlOpenResult> {
+  const url = todoUrl(rawUrl);
+  if (!url) return { success: false, message: "任务单地址无效或不受信任。" };
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch {
+    return { success: false, message: "无法在浏览器中打开任务单。" };
+  }
+}
+
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
     width: 1040,
@@ -658,6 +846,27 @@ function createWindow(): void {
     return chatProxyUrl;
   });
 
+  ipcMain.handle("tasks:get-counts", async (event) => {
+    if (event.sender !== mainWindow.webContents) {
+      return { success: false, message: "无法验证任务统计请求来源。" } satisfies TodoCountsResult;
+    }
+    return getTodoCounts();
+  });
+
+  ipcMain.handle("tasks:get-list", async (event, timeState: unknown) => {
+    if (event.sender !== mainWindow.webContents) {
+      return { success: false, message: "无法验证任务列表请求来源。" } satisfies TodoListResult;
+    }
+    return getTodoList(timeState);
+  });
+
+  ipcMain.handle("tasks:open-url", async (event, url: unknown) => {
+    if (event.sender !== mainWindow.webContents) {
+      return { success: false, message: "无法验证任务单跳转请求来源。" } satisfies TaskUrlOpenResult;
+    }
+    return openTodoUrl(url);
+  });
+
   ipcMain.handle("appointment:download-outbound-template", async (event, rawUrl: unknown) => {
     if (event.sender !== mainWindow.webContents) {
       return { status: "failed", message: "无法验证模板下载请求来源。" } satisfies OutboundTemplateDownloadResult;
@@ -686,6 +895,9 @@ function createWindow(): void {
     ipcMain.removeHandler("auth:get-mcp-session-input");
     ipcMain.removeHandler("server:get-endpoints");
     ipcMain.removeHandler("server:get-chat-proxy-url");
+    ipcMain.removeHandler("tasks:get-counts");
+    ipcMain.removeHandler("tasks:get-list");
+    ipcMain.removeHandler("tasks:open-url");
     ipcMain.removeHandler("appointment:download-outbound-template");
     ipcMain.removeHandler("appointment:upload-outbound-plan");
     ipcMain.removeHandler("appointment:create-outbound-plan");
